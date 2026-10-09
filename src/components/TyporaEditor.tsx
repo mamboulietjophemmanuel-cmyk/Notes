@@ -36,6 +36,28 @@ export interface MdBlock {
   startLine: number;
 }
 
+export function detectBlockType(raw: string): MdBlockType {
+  const trimmedStart = raw.trimStart();
+  const trimmed = raw.trim();
+  const lines = raw.split('\n');
+
+  if (trimmed.startsWith('```')) return 'code';
+  if (trimmed.startsWith('$$')) return 'math';
+  if (/^!\[[^\]]*\]\([^)]+\)$/.test(trimmed)) return 'image';
+  if (/^#{1,6}(\s|$)/.test(trimmedStart)) return 'heading';
+  if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) return 'hr';
+  if (
+    trimmed.startsWith('|') &&
+    lines.length >= 2 &&
+    /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[1])
+  ) {
+    return 'table';
+  }
+  if (trimmed.startsWith('>')) return 'blockquote';
+  if (/^([-*+]|\d+\.)(\s|$)/.test(trimmedStart)) return 'list';
+  return 'paragraph';
+}
+
 export function parseMarkdownIntoBlocks(markdown: string): MdBlock[] {
   const normalized = markdown.replace(/\r\n/g, '\n');
   const lines = normalized.split('\n');
@@ -45,6 +67,7 @@ export function parseMarkdownIntoBlocks(markdown: string): MdBlock[] {
   while (i < lines.length) {
     const line = lines[i];
     const trimmed = line.trim();
+    const trimmedStart = line.trimStart();
 
     if (trimmed === '') {
       i++;
@@ -117,8 +140,8 @@ export function parseMarkdownIntoBlocks(markdown: string): MdBlock[] {
       continue;
     }
 
-    // 4. Heading (# to ####)
-    if (/^#{1,4}\s+/.test(trimmed)) {
+    // 4. Heading (# to ######, including "# " or "#" while editing)
+    if (/^#{1,6}(\s|$)/.test(trimmedStart)) {
       blocks.push({
         id: `blk-${startLine}`,
         type: 'heading',
@@ -178,10 +201,13 @@ export function parseMarkdownIntoBlocks(markdown: string): MdBlock[] {
       continue;
     }
 
-    // 8. List item
-    if (/^([-*+]|\d+\.)\s+/.test(trimmed)) {
+    // 8. List item (-, *, +, 1.)
+    if (/^([-*+]|\d+\.)(\s|$)/.test(trimmedStart)) {
       const buf: string[] = [];
-      while (i < lines.length && /^([-*+]|\d+\.)\s+/.test(lines[i].trim())) {
+      while (
+        i < lines.length &&
+        /^([-*+]|\d+\.)(\s|$)/.test(lines[i].trimStart())
+      ) {
         buf.push(lines[i]);
         i++;
       }
@@ -194,18 +220,23 @@ export function parseMarkdownIntoBlocks(markdown: string): MdBlock[] {
       continue;
     }
 
-    // 9. Paragraph
-    const buf: string[] = [];
+    // 9. Paragraph (Guaranteed to consume at least the current line so `i` always advances)
+    const buf: string[] = [lines[i]];
+    i++;
     while (
       i < lines.length &&
       lines[i].trim() !== '' &&
-      !lines[i].trim().startsWith('#') &&
+      !/^#{1,6}(\s|$)/.test(lines[i].trimStart()) &&
       !lines[i].trim().startsWith('```') &&
       !lines[i].trim().startsWith('$$') &&
       !lines[i].trim().startsWith('>') &&
-      !lines[i].trim().startsWith('|') &&
+      !(
+        lines[i].trim().startsWith('|') &&
+        i + 1 < lines.length &&
+        /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])
+      ) &&
       !/^!\[[^\]]*\]\([^)]+\)$/.test(lines[i].trim()) &&
-      !/^([-*+]|\d+\.)\s+/.test(lines[i].trim()) &&
+      !/^([-*+]|\d+\.)(\s|$)/.test(lines[i].trimStart()) &&
       !/^(-{3,}|\*{3,}|_{3,})$/.test(lines[i].trim())
     ) {
       buf.push(lines[i]);
@@ -865,13 +896,40 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
   onOpenFormulaModal,
   onTriggerImageUpload,
 }) => {
-  const blocks = useMemo(() => parseMarkdownIntoBlocks(markdown), [markdown]);
+  // Keep blocks in state while editing so clearing a block's text never causes it to vanish mid-typing
+  const [blocks, setBlocks] = useState<MdBlock[]>(() =>
+    parseMarkdownIntoBlocks(markdown)
+  );
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [copiedBlockIdx, setCopiedBlockIdx] = useState<number | null>(null);
+  const lastEmittedMarkdownRef = useRef<string>(markdown);
+
+  useEffect(() => {
+    if (markdown !== lastEmittedMarkdownRef.current) {
+      lastEmittedMarkdownRef.current = markdown;
+      setBlocks(parseMarkdownIntoBlocks(markdown));
+      setFocusedIndex(null);
+    }
+  }, [markdown]);
+
+  const commitBlocks = (nextBlocks: MdBlock[]) => {
+    const safeBlocks =
+      nextBlocks.length > 0
+        ? nextBlocks
+        : [{ id: 'blk-0', type: 'paragraph' as const, raw: '', startLine: 0 }];
+    setBlocks(safeBlocks);
+    const serialized = serializeBlocksToMarkdown(safeBlocks);
+    lastEmittedMarkdownRef.current = serialized;
+    onChange(serialized);
+  };
 
   const updateBlockAt = (idx: number, newRaw: string) => {
-    const next = blocks.map((b, i) => (i === idx ? { ...b, raw: newRaw } : b));
-    onChange(serializeBlocksToMarkdown(next));
+    const next = blocks.map((b, i) =>
+      i === idx
+        ? { ...b, raw: newRaw, type: detectBlockType(newRaw) }
+        : b
+    );
+    commitBlocks(next);
   };
 
   const deleteBlockAt = (idx: number) => {
@@ -880,21 +938,25 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
       return;
     }
     const next = blocks.filter((_, i) => i !== idx);
-    onChange(serializeBlocksToMarkdown(next));
+    commitBlocks(next);
     setFocusedIndex(Math.max(0, idx - 1));
   };
 
   const splitBlockAt = (idx: number, before: string, after: string) => {
     const next = [...blocks];
-    next[idx] = { ...next[idx], raw: before };
+    next[idx] = {
+      ...next[idx],
+      raw: before,
+      type: detectBlockType(before),
+    };
     const newBlock: MdBlock = {
       id: `blk-new-${Date.now()}`,
-      type: 'paragraph',
+      type: detectBlockType(after),
       raw: after,
       startLine: next[idx].startLine + 1,
     };
     next.splice(idx + 1, 0, newBlock);
-    onChange(serializeBlocksToMarkdown(next));
+    commitBlocks(next);
     setFocusedIndex(idx + 1);
   };
 
@@ -902,11 +964,11 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
     const next = [...blocks];
     next.splice(idx + 1, 0, {
       id: `blk-ins-${Date.now()}`,
-      type: 'paragraph',
+      type: detectBlockType(rawSnippet),
       raw: rawSnippet,
       startLine: 0,
     });
-    onChange(serializeBlocksToMarkdown(next));
+    commitBlocks(next);
     if (focusNew) setFocusedIndex(idx + 1);
   };
 
@@ -919,11 +981,11 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
       {blocks.map((block, idx) => {
         const isFocused = focusedIndex === idx;
 
-        // 1. HEADING BLOCK (# to ####)
+        // 1. HEADING BLOCK (# to ######)
         if (block.type === 'heading') {
-          const match = block.raw.match(/^(#{1,4})\s+(.*)$/);
-          const level = match ? match[1].length : 1;
-          const text = match ? match[2] : block.raw;
+          const match = block.raw.match(/^(#{1,6})(?:\s+(.*))?$/);
+          const level = match ? Math.min(4, match[1].length) : 1;
+          const text = match ? match[2] || '' : block.raw;
           const cleanId = `heading-${block.startLine}-${text
             .replace(/[*_`~]/g, '')
             .trim()
@@ -967,9 +1029,15 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
               key={block.id}
               id={cleanId}
               onClick={() => setFocusedIndex(idx)}
-              className="group relative cursor-text rounded-lg transition-colors hover:bg-[var(--adw-hover-bg)]/50 px-1.5 -mx-1.5"
+              className="group relative cursor-text rounded-lg transition-colors hover:bg-[var(--adw-hover-bg)]/50 px-1.5 -mx-1.5 min-h-[1.4em]"
             >
-              {renderInlineFormatting(text, assets, onImageClick, `h-${idx}`)}
+              {text.trim() ? (
+                renderInlineFormatting(text, assets, onImageClick, `h-${idx}`)
+              ) : (
+                <span className="text-[var(--adw-fg-muted)] opacity-50">
+                  Titre vide...
+                </span>
+              )}
             </Tag>
           );
         }
@@ -1217,7 +1285,7 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
                 }
                 rows={Math.max(2, innerCode.split('\n').length)}
                 spellCheck={false}
-                className="w-full resize-y border-0 bg-transparent p-4 font-mono text-[13px] leading-relaxed text-[var(--adw-fg)] focus:outline-none"
+                className="w-full resize-none border-0 bg-transparent p-4 font-mono text-[13px] leading-relaxed text-[var(--adw-fg)] focus:outline-none"
               />
             </div>
           );
@@ -1299,8 +1367,8 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
           const listLines = block.raw.split('\n');
           const isOrdered = /^\d+\.\s+/.test(listLines[0]?.trim() || '');
           const items = listLines.map((line, lineIdx) => {
-            const rawItem = line.trim().replace(/^([-*+]|\d+\.)\s+/, '');
-            const taskMatch = rawItem.match(/^\[([ xX])\]\s+(.*)$/);
+            const rawItem = line.trim().replace(/^([-*+]|\d+\.)\s*/, '');
+            const taskMatch = rawItem.match(/^\[([ xX])\]\s*(.*)$/);
             if (taskMatch) {
               const checked = taskMatch[1].toLowerCase() === 'x';
               return {

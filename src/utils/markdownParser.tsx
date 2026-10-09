@@ -573,15 +573,20 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
     }
 
     // 9. Standard Paragraph
-    const paraLines: string[] = [];
+    const paraLines: string[] = [lines[i]];
+    i++;
     while (
       i < lines.length &&
       lines[i].trim() !== '' &&
-      !lines[i].trim().startsWith('#') &&
+      !/^#{1,4}\s+/.test(lines[i]) &&
       !lines[i].trim().startsWith('```') &&
       !lines[i].trim().startsWith('$$') &&
       !lines[i].trim().startsWith('>') &&
-      !lines[i].trim().startsWith('|') &&
+      !(
+        lines[i].trim().startsWith('|') &&
+        i + 1 < lines.length &&
+        /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])
+      ) &&
       !/^[-*+]\s+/.test(lines[i].trim()) &&
       !/^\d+\.\s+/.test(lines[i].trim()) &&
       !/^(-{3,}|\*{3,}|_{3,})$/.test(lines[i].trim())
