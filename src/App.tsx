@@ -535,7 +535,10 @@ export default function App() {
              Center: Document Title (README.md) + Path subtitle (~/Documents)
              Right: [Insert/Properties icon] [☰] [✕]
          ===================================================================== */}
-      <header className="relative flex h-[46px] shrink-0 items-center justify-between border-b border-[var(--adw-border)] bg-[var(--adw-headerbar-bg)] px-2.5">
+      <header
+        data-tauri-drag-region
+        className="relative flex h-[46px] shrink-0 items-center justify-between border-b border-[var(--adw-border)] bg-[var(--adw-headerbar-bg)] px-2.5"
+      >
         {/* Left Zone: "Ouvrir ▾" popover button + "[+]" new tab button */}
         <div className="flex items-center gap-1 shrink-0">
           <div className="relative" ref={openPopoverRef}>
@@ -639,7 +642,10 @@ export default function App() {
         </div>
 
         {/* Center Zone: AdwWindowTitle (Filename + Path Subtitle) */}
-        <div className="flex flex-col items-center justify-center min-w-0 px-4">
+        <div
+          data-tauri-drag-region
+          className="flex flex-1 flex-col items-center justify-center min-w-0 px-4"
+        >
           {isRenamingTitle && activeDocument ? (
             <input
               type="text"
@@ -667,7 +673,10 @@ export default function App() {
               {activeDocument?.filename || 'Sans titre.md'}
             </button>
           )}
-          <span className="truncate text-[11px] leading-tight text-[var(--adw-fg-muted)]">
+          <span
+            data-tauri-drag-region
+            className="pointer-events-none truncate text-[11px] leading-tight text-[var(--adw-fg-muted)]"
+          >
             ~/Documents
           </span>
         </div>
@@ -845,10 +854,24 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
-              if (activeDocument) handleCloseTab(activeDocument.id);
+              const tauriInternals = (
+                window as unknown as {
+                  __TAURI_INTERNALS__?: {
+                    invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+                  };
+                }
+              ).__TAURI_INTERNALS__;
+
+              if (tauriInternals?.invoke) {
+                tauriInternals.invoke('plugin:window|close', { label: 'main' }).catch(() => {
+                  if (activeDocument) handleCloseTab(activeDocument.id);
+                });
+              } else if (activeDocument) {
+                handleCloseTab(activeDocument.id);
+              }
             }}
             className="ml-1 flex h-6 w-6 items-center justify-center rounded-full bg-[var(--adw-active-bg)] text-[var(--adw-fg)] transition-colors hover:bg-[var(--adw-fg)]/20"
-            title="Fermer l’onglet actif (Ctrl+W)"
+            title="Fermer la fenêtre"
           >
             <X className="h-3.5 w-3.5" />
           </button>
