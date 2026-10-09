@@ -1,0 +1,6 @@
+{
+  "name": "AdwNotes — Carnet Markdown Libadwaita",
+  "description": "Application de prise de notes Markdown minimaliste inspirée de GNOME Libadwaita pour Windows, avec gestion multi-onglets (.md), tableaux, formules LaTeX et glisser-déposer d'images.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

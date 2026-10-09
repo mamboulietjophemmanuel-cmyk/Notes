@@ -1,0 +1,301 @@
+@import "tailwindcss";
+
+:root {
+  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-serif: 'Source Serif 4', Georgia, serif;
+  --font-mono: 'JetBrains Mono', Consolas, monospace;
+
+  /* Libadwaita Light Theme Palette */
+  --adw-window-bg: #FAFAFA;
+  --adw-headerbar-bg: #EBEBEB;
+  --adw-tabbar-bg: #E3E3E3;
+  --adw-sidebar-bg: #F3F3F3;
+  --adw-view-bg: #FFFFFF;
+  --adw-card-bg: #FFFFFF;
+  --adw-popover-bg: #FFFFFF;
+  --adw-hover-bg: rgba(0, 0, 0, 0.055);
+  --adw-active-bg: rgba(0, 0, 0, 0.09);
+  --adw-border: rgba(0, 0, 0, 0.11);
+  --adw-border-subtle: rgba(0, 0, 0, 0.07);
+  --adw-fg: #1E1E1E;
+  --adw-fg-secondary: #505050;
+  --adw-fg-muted: #767676;
+  --adw-accent: #3584E4;
+  --adw-accent-hover: #1C71D8;
+  --adw-accent-soft: rgba(53, 132, 228, 0.12);
+  --adw-code-bg: #F4F4F6;
+  --adw-shadow-popover: 0 8px 28px rgba(0, 0, 0, 0.14), 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.dark {
+  /* Libadwaita Dark Theme Palette */
+  --adw-window-bg: #242424;
+  --adw-headerbar-bg: #303030;
+  --adw-tabbar-bg: #262626;
+  --adw-sidebar-bg: #2B2B2B;
+  --adw-view-bg: #1E1E1E;
+  --adw-card-bg: #2D2D2D;
+  --adw-popover-bg: #363636;
+  --adw-hover-bg: rgba(255, 255, 255, 0.07);
+  --adw-active-bg: rgba(255, 255, 255, 0.12);
+  --adw-border: rgba(255, 255, 255, 0.12);
+  --adw-border-subtle: rgba(255, 255, 255, 0.07);
+  --adw-fg: #F6F5F4;
+  --adw-fg-secondary: #C0BFBC;
+  --adw-fg-muted: #9A9996;
+  --adw-accent: #3584E4;
+  --adw-accent-hover: #62A0EA;
+  --adw-accent-soft: rgba(98, 160, 234, 0.18);
+  --adw-code-bg: #28282C;
+  --adw-shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.45), 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background-color: var(--adw-window-bg);
+  color: var(--adw-fg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  user-select: none;
+}
+
+.dark body {
+  letter-spacing: 0.006em;
+}
+
+/* Custom subtle Libadwaita scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.28);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.48);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+/* Libadwaita button primitive */
+.adw-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: 7px;
+  transition: background-color 140ms cubic-bezier(0.16, 1, 0.3, 1), opacity 140ms cubic-bezier(0.16, 1, 0.3, 1), transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  color: var(--adw-fg);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.adw-btn:hover {
+  background-color: var(--adw-hover-bg);
+}
+
+.adw-btn:active {
+  background-color: var(--adw-active-bg);
+  transform: scale(0.985);
+}
+
+.adw-btn-active {
+  background-color: var(--adw-active-bg);
+  font-weight: 600;
+}
+
+.adw-btn-suggested {
+  background-color: var(--adw-accent);
+  color: #FFFFFF;
+}
+
+.adw-btn-suggested:hover {
+  background-color: var(--adw-accent-hover);
+}
+
+/* Markdown Rendered Document Typography */
+.adw-markdown {
+  user-select: text;
+  line-height: 1.68;
+  font-size: 15.5px;
+  color: var(--adw-fg);
+}
+
+.adw-markdown-serif {
+  font-family: var(--font-serif);
+  font-size: 16.5px;
+  line-height: 1.74;
+}
+
+.adw-markdown h1,
+.adw-markdown h2,
+.adw-markdown h3,
+.adw-markdown h4 {
+  font-family: var(--font-sans);
+  color: var(--adw-fg);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+  margin-top: 1.6em;
+  margin-bottom: 0.6em;
+  line-height: 1.25;
+}
+
+.adw-markdown h1:first-child,
+.adw-markdown h2:first-child {
+  margin-top: 0;
+}
+
+.adw-markdown h1 {
+  font-size: clamp(1.65rem, 2.5vw, 2.15rem);
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid var(--adw-border-subtle);
+}
+
+.adw-markdown h2 {
+  font-size: clamp(1.3rem, 2vw, 1.55rem);
+}
+
+.adw-markdown h3 {
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.adw-markdown p {
+  margin-top: 0;
+  margin-bottom: 1.05em;
+}
+
+.adw-markdown ul,
+.adw-markdown ol {
+  margin-top: 0;
+  margin-bottom: 1.15em;
+  padding-left: 1.5rem;
+}
+
+.adw-markdown ul {
+  list-style-type: disc;
+}
+
+.adw-markdown ol {
+  list-style-type: decimal;
+}
+
+.adw-markdown li {
+  margin-bottom: 0.35em;
+}
+
+/* Clean all-around hairline callout/blockquote (no thick left border) */
+.adw-markdown blockquote {
+  margin: 1.25rem 0;
+  padding: 0.9rem 1.15rem;
+  border-radius: 10px;
+  border: 1px solid var(--adw-border);
+  background-color: var(--adw-code-bg);
+  color: var(--adw-fg-secondary);
+}
+
+.adw-markdown blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+.adw-markdown code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background-color: var(--adw-code-bg);
+  padding: 0.16em 0.42em;
+  border-radius: 5px;
+  border: 1px solid var(--adw-border-subtle);
+}
+
+.adw-markdown pre {
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  background-color: var(--adw-code-bg);
+  border: 1px solid var(--adw-border);
+  border-radius: 10px;
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  margin: 1.2rem 0;
+}
+
+.adw-markdown pre code {
+  background: transparent;
+  padding: 0;
+  border: none;
+  font-size: inherit;
+}
+
+/* Markdown Tables with Tabular Numerals */
+.adw-markdown .table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  margin: 1.35rem 0;
+  border: 1px solid var(--adw-border);
+  border-radius: 10px;
+  background-color: var(--adw-card-bg);
+}
+
+.adw-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.adw-markdown thead th {
+  background-color: var(--adw-code-bg);
+  color: var(--adw-fg);
+  font-weight: 600;
+  padding: 0.65rem 0.95rem;
+  border-bottom: 1px solid var(--adw-border);
+  font-family: var(--font-sans);
+}
+
+.adw-markdown tbody td {
+  padding: 0.6rem 0.95rem;
+  border-bottom: 1px solid var(--adw-border-subtle);
+  color: var(--adw-fg-secondary);
+}
+
+.adw-markdown tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.adw-markdown tbody tr:hover td {
+  background-color: var(--adw-hover-bg);
+}
+
+.adw-markdown hr {
+  border: 0;
+  border-top: 1px solid var(--adw-border);
+  margin: 1.85rem 0;
+}
+
+/* KaTeX block math container */
+.adw-math-block {
+  margin: 1.25rem 0;
+  padding: 0.9rem 1.15rem;
+  border-radius: 10px;
+  background-color: var(--adw-code-bg);
+  border: 1px solid var(--adw-border-subtle);
+  overflow-x: auto;
+  text-align: center;
+}
+
