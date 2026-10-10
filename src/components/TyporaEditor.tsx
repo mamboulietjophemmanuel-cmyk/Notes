@@ -16,7 +16,15 @@ import {
   Table as TableIcon,
   ListChecks,
   Quote,
+  WrapText,
+  Layers,
+  BringToFront,
+  SendToBack,
+  Move,
 } from 'lucide-react';
+
+export type ImageWrapMode = 'break' | 'wrap';
+export type ImageWrapSide = 'left' | 'right';
 
 export type MdBlockType =
   | 'heading'
@@ -873,6 +881,483 @@ const WysiwygTableBlock: React.FC<{
   );
 };
 
+const IMAGE_WRAP_OPTIONS: {
+  id: ImageWrapMode;
+  label: string;
+  shortLabel: string;
+  desc: string;
+}[] = [
+  {
+    id: 'break',
+    label: 'Haut et bas',
+    shortLabel: 'Haut et bas',
+    desc: 'L’image occupe sa propre ligne, le texte reste au-dessus et en dessous.',
+  },
+  {
+    id: 'wrap',
+    label: 'Épouser le texte',
+    shortLabel: 'Épouser',
+    desc: 'Déplacez l’image avec sa pastille supérieure : le texte s’organise dynamiquement autour d’elle.',
+  },
+];
+
+function parseImageMeta(rawAlt: string): {
+  caption: string;
+  widthPct: number;
+  wrapMode: ImageWrapMode;
+  wrapSide: ImageWrapSide;
+} {
+  const parts = rawAlt.split('|').map((s) => s.trim());
+  const caption = parts[0] || '';
+  let widthPct = 100;
+  if (parts[1]) {
+    const num = parseInt(parts[1].replace('%', ''), 10);
+    if (!Number.isNaN(num)) {
+      widthPct = Math.min(100, Math.max(15, num));
+    }
+  }
+
+  let wrapMode: ImageWrapMode = 'break';
+  let wrapSide: ImageWrapSide = 'left';
+
+  const rawMode = parts[2] || '';
+  if (rawMode === 'wrap' || rawMode === 'wrap-left') {
+    wrapMode = 'wrap';
+    wrapSide = 'left';
+  } else if (rawMode === 'wrap-right') {
+    wrapMode = 'wrap';
+    wrapSide = 'right';
+  }
+
+  if (parts[3] === 'left' || parts[3] === 'right') {
+    wrapSide = parts[3];
+  }
+
+  return { caption, widthPct, wrapMode, wrapSide };
+}
+
+function serializeImageMarkdown(
+  caption: string,
+  widthPct: number,
+  wrapMode: ImageWrapMode,
+  wrapSide: ImageWrapSide,
+  rawUrl: string
+): string {
+  const clamped = Math.min(100, Math.max(15, Math.round(widthPct)));
+  if (wrapMode === 'break') {
+    return `![${caption}|${clamped}%](${rawUrl})`;
+  }
+  return `![${caption}|${clamped}%|wrap|${wrapSide}](${rawUrl})`;
+}
+
+const WysiwygImageBlock: React.FC<{
+  raw: string;
+  assets: Record<string, MediaAsset>;
+  onChange: (newRaw: string) => void;
+  onDelete: () => void;
+  onMoveWrapVertical?: (clientY: number, updatedRaw: string) => void;
+  onImageClick?: (src: string, alt: string) => void;
+}> = ({
+  raw,
+  assets,
+  onChange,
+  onDelete,
+  onMoveWrapVertical,
+  onImageClick,
+}) => {
+  const imgMatch = raw.trim().match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+  const rawAlt = imgMatch ? imgMatch[1] : '';
+  const rawUrl = imgMatch ? imgMatch[2].trim() : '';
+
+  const parsed = useMemo(() => parseImageMeta(rawAlt), [rawAlt]);
+  const [liveWidth, setLiveWidth] = useState<number>(parsed.widthPct);
+  const [isResizing, setIsResizing] = useState<boolean>(false);
+  const [liveSide, setLiveSide] = useState<ImageWrapSide>(parsed.wrapSide);
+  const [isDraggingPos, setIsDraggingPos] = useState<boolean>(false);
+  const [wrapMenuOpen, setWrapMenuOpen] = useState<boolean>(false);
+
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const onChangeRef = useRef(onChange);
+  const onMoveWrapVerticalRef = useRef(onMoveWrapVertical);
+
+  useEffect(() => {
+    onChangeRef.current = onChange;
+    onMoveWrapVerticalRef.current = onMoveWrapVertical;
+  }, [onChange, onMoveWrapVertical]);
+
+  useEffect(() => {
+    if (!isResizing) setLiveWidth(parsed.widthPct);
+  }, [parsed.widthPct, isResizing]);
+
+  useEffect(() => {
+    if (!isDraggingPos) {
+      setLiveSide(parsed.wrapSide);
+    }
+  }, [parsed.wrapSide, isDraggingPos]);
+
+  let resolvedSrc = rawUrl;
+  if (rawUrl.startsWith('asset://')) {
+    const assetId = rawUrl.replace('asset://', '').trim();
+    const assetMeta = assets[assetId];
+    if (assetMeta) resolvedSrc = assetMeta.dataUrl;
+  }
+
+  const handleCornerResizeStart = (
+    e: React.MouseEvent,
+    corner: 'nw' | 'ne' | 'sw' | 'se'
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const cardEl = cardRef.current;
+    if (!cardEl) return;
+
+    const editorContainer =
+      (cardEl.closest('.adw-markdown') as HTMLElement | null) ||
+      cardEl.parentElement;
+    const parentWidth = editorContainer
+      ? editorContainer.clientWidth - 64
+      : 720;
+    const startX = e.clientX;
+    const startWidthPx = cardEl.getBoundingClientRect().width;
+    const isLeftCorner = corner === 'nw' || corner === 'sw';
+
+    setIsResizing(true);
+    let latestPct = liveWidth;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = isLeftCorner
+        ? startX - moveEvent.clientX
+        : moveEvent.clientX - startX;
+      const multiplier = parsed.wrapMode === 'break' ? 1.5 : 1.0;
+      const nextWidthPx = startWidthPx + deltaX * multiplier;
+      const nextPct = Math.min(
+        100,
+        Math.max(15, Math.round((nextWidthPx / Math.max(240, parentWidth)) * 100))
+      );
+      latestPct = nextPct;
+      setLiveWidth(nextPct);
+    };
+
+    const onMouseUp = () => {
+      setIsResizing(false);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      onChange(
+        serializeImageMarkdown(
+          parsed.caption,
+          latestPct,
+          parsed.wrapMode,
+          liveSide,
+          rawUrl
+        )
+      );
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
+  // Dragging via the top pill ("Déplacer")
+  const handlePillDragStart = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const cardEl = cardRef.current;
+    if (!cardEl) return;
+    const editorContainer = cardEl.closest(
+      '.adw-markdown'
+    ) as HTMLElement | null;
+
+    setIsDraggingPos(true);
+    let currentSide: ImageWrapSide = liveSide;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      if (parsed.wrapMode === 'wrap' && editorContainer) {
+        const rect = editorContainer.getBoundingClientRect();
+        const midX = rect.left + rect.width / 2;
+        const nextSide: ImageWrapSide =
+          moveEvent.clientX < midX ? 'left' : 'right';
+        if (nextSide !== currentSide) {
+          currentSide = nextSide;
+          setLiveSide(nextSide);
+        }
+      }
+
+      const nextRaw = serializeImageMarkdown(
+        parsed.caption,
+        liveWidth,
+        parsed.wrapMode,
+        currentSide,
+        rawUrl
+      );
+      onMoveWrapVerticalRef.current?.(moveEvent.clientY, nextRaw);
+    };
+
+    const onMouseUp = () => {
+      setIsDraggingPos(false);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      onChangeRef.current(
+        serializeImageMarkdown(
+          parsed.caption,
+          liveWidth,
+          parsed.wrapMode,
+          currentSide,
+          rawUrl
+        )
+      );
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
+  const selectWrapMode = (newMode: ImageWrapMode) => {
+    setWrapMenuOpen(false);
+    const targetWidth =
+      newMode === 'wrap' && liveWidth > 75 ? 45 : liveWidth;
+
+    setLiveWidth(targetWidth);
+    onChange(
+      serializeImageMarkdown(
+        parsed.caption,
+        targetWidth,
+        newMode,
+        liveSide,
+        rawUrl
+      )
+    );
+  };
+
+  const cardStyle: React.CSSProperties = {
+    width: `${liveWidth}%`,
+    maxWidth: '100%',
+  };
+
+  if (parsed.wrapMode === 'wrap') {
+    if (liveSide === 'left') {
+      cardStyle.float = 'left';
+      cardStyle.marginRight = '1.5rem';
+      cardStyle.marginBottom = '0.85rem';
+      cardStyle.marginTop = '0.5rem';
+      cardStyle.shapeOutside = 'margin-box';
+    } else {
+      cardStyle.float = 'right';
+      cardStyle.marginLeft = '1.5rem';
+      cardStyle.marginBottom = '0.85rem';
+      cardStyle.marginTop = '0.5rem';
+      cardStyle.shapeOutside = 'margin-box';
+    }
+  }
+
+  const activeWrapMeta =
+    IMAGE_WRAP_OPTIONS.find((o) => o.id === parsed.wrapMode) ||
+    IMAGE_WRAP_OPTIONS[0];
+
+  return (
+    <div
+      ref={cardRef}
+      style={cardStyle}
+      className={`group relative z-20 rounded-xl border border-[var(--adw-border)] bg-[var(--adw-code-bg)] p-2.5 transition-shadow select-none hover:border-[var(--adw-accent)]/60 ${
+        parsed.wrapMode === 'break' ? 'my-5 mx-auto clear-both' : ''
+      } ${
+        isResizing || isDraggingPos ? 'ring-2 ring-[var(--adw-accent)]' : ''
+      }`}
+    >
+      {/* Top Floating Control Pill ("Déplacer") */}
+      <div
+        onMouseDown={handlePillDragStart}
+        title={
+          parsed.wrapMode === 'wrap'
+            ? 'Maintenir et glisser pour déplacer l’image (gauche, droite, haut ou bas autour du texte)'
+            : 'Maintenir et glisser pour déplacer l’image entre les paragraphes'
+        }
+        className="
+          pointer-events-auto absolute -top-3 left-1/2 z-30 flex -translate-x-1/2 cursor-grab
+          items-center gap-1 rounded-full border border-[var(--adw-border)] bg-[var(--adw-card-bg)]
+          px-2.5 py-0.5 text-[10px] font-medium text-[var(--adw-fg-secondary)] shadow-md
+          opacity-0 transition-opacity group-hover:opacity-100 active:cursor-grabbing
+        "
+      >
+        <Move className="h-3 w-3 text-[var(--adw-accent)]" />
+        <span>Déplacer</span>
+      </div>
+
+      {/* 4 Corner Drag-Resize Handles */}
+      <div
+        onMouseDown={(e) => handleCornerResizeStart(e, 'nw')}
+        title="Maintenir et glisser pour redimensionner l’image"
+        className="
+          pointer-events-auto absolute -top-1.5 -left-1.5 z-30 h-3.5 w-3.5 cursor-nwse-resize
+          rounded-full border-2 border-white bg-[var(--adw-accent)] shadow
+          opacity-0 transition-opacity group-hover:opacity-100
+        "
+      />
+      <div
+        onMouseDown={(e) => handleCornerResizeStart(e, 'ne')}
+        title="Maintenir et glisser pour redimensionner l’image"
+        className="
+          pointer-events-auto absolute -top-1.5 -right-1.5 z-30 h-3.5 w-3.5 cursor-nesw-resize
+          rounded-full border-2 border-white bg-[var(--adw-accent)] shadow
+          opacity-0 transition-opacity group-hover:opacity-100
+        "
+      />
+      <div
+        onMouseDown={(e) => handleCornerResizeStart(e, 'sw')}
+        title="Maintenir et glisser pour redimensionner l’image"
+        className="
+          pointer-events-auto absolute -bottom-1.5 -left-1.5 z-30 h-3.5 w-3.5 cursor-nesw-resize
+          rounded-full border-2 border-white bg-[var(--adw-accent)] shadow
+          opacity-0 transition-opacity group-hover:opacity-100
+        "
+      />
+      <div
+        onMouseDown={(e) => handleCornerResizeStart(e, 'se')}
+        title="Maintenir et glisser pour redimensionner l’image"
+        className="
+          pointer-events-auto absolute -bottom-1.5 -right-1.5 z-30 h-3.5 w-3.5 cursor-nwse-resize
+          rounded-full border-2 border-white bg-[var(--adw-accent)] shadow
+          opacity-0 transition-opacity group-hover:opacity-100
+        "
+      />
+
+      {/* Live Indicator Badge while resizing or dragging */}
+      {(isResizing || isDraggingPos) && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
+          <span className="rounded-lg bg-black/75 px-3 py-1 font-mono text-xs font-semibold text-white shadow-lg backdrop-blur-sm">
+            {isResizing
+              ? `${liveWidth}%`
+              : parsed.wrapMode === 'wrap'
+              ? `Épouser (${liveSide === 'left' ? 'Gauche' : 'Droite'})`
+              : 'Déplacement...'}
+          </span>
+        </div>
+      )}
+
+      {/* Main Image Graphic */}
+      {resolvedSrc && !resolvedSrc.startsWith('asset://') ? (
+        <img
+          src={resolvedSrc}
+          alt={parsed.caption || 'Illustration'}
+          referrerPolicy="no-referrer"
+          draggable={false}
+          onClick={() => onImageClick?.(resolvedSrc, parsed.caption)}
+          className="w-full cursor-zoom-in rounded-lg object-cover"
+        />
+      ) : (
+        <div className="flex flex-col items-center justify-center gap-2 py-10 text-xs text-[var(--adw-fg-muted)]">
+          <ImageIcon className="h-7 w-7 opacity-60" />
+          <span>Image introuvable ({rawUrl})</span>
+        </div>
+      )}
+
+      {/* Clean Minimalist Footer: Caption + Wrap Mode + Fullscreen + Delete */}
+      <div className="pointer-events-auto relative z-30 mt-2 flex items-center justify-between gap-1.5 px-0.5 text-xs">
+        <input
+          type="text"
+          value={parsed.caption}
+          onChange={(e) => {
+            onChange(
+              serializeImageMarkdown(
+                e.target.value,
+                liveWidth,
+                parsed.wrapMode,
+                liveSide,
+                rawUrl
+              )
+            );
+          }}
+          placeholder="Légende..."
+          className="min-w-0 flex-1 truncate rounded border border-transparent bg-transparent px-1 py-0.5 text-xs font-medium text-[var(--adw-fg-secondary)] focus:border-[var(--adw-accent)] focus:bg-[var(--adw-view-bg)] focus:outline-none"
+        />
+
+        <div className="relative flex shrink-0 items-center gap-0.5">
+          {/* Habillage du texte (2 options : Haut et bas / Épouser le texte) */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setWrapMenuOpen((prev) => !prev);
+            }}
+            className={`flex items-center gap-1 rounded p-1 text-[11px] transition-colors ${
+              parsed.wrapMode !== 'break'
+                ? 'bg-[var(--adw-accent-soft)] text-[var(--adw-accent)] font-medium'
+                : 'text-[var(--adw-fg-secondary)] hover:bg-[var(--adw-hover-bg)]'
+            }`}
+            title={`Habillage du texte : ${activeWrapMeta.label}`}
+          >
+            <WrapText className="h-3.5 w-3.5" />
+          </button>
+
+          {/* Popover menu for the 2 wrapping options */}
+          {wrapMenuOpen && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="absolute right-0 bottom-full z-50 mb-2 w-60 rounded-xl border border-[var(--adw-border)] bg-[var(--adw-card-bg)] p-1.5 shadow-xl"
+            >
+              <div className="px-2 py-1 text-[10px] font-semibold tracking-wider text-[var(--adw-fg-muted)] uppercase">
+                Habillage du texte
+              </div>
+              {IMAGE_WRAP_OPTIONS.map((opt) => {
+                const isSelected = parsed.wrapMode === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => selectWrapMode(opt.id)}
+                    className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
+                      isSelected
+                        ? 'bg-[var(--adw-accent-soft)] text-[var(--adw-accent)]'
+                        : 'text-[var(--adw-fg)] hover:bg-[var(--adw-hover-bg)]'
+                    }`}
+                  >
+                    <div className="mt-0.5 shrink-0">
+                      {opt.id === 'break' && <AlignCenter className="h-3.5 w-3.5" />}
+                      {opt.id === 'wrap' && <WrapText className="h-3.5 w-3.5" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between text-xs font-medium">
+                        <span>{opt.label}</span>
+                        {isSelected && <Check className="h-3 w-3 shrink-0" />}
+                      </div>
+                      <p className="mt-0.5 text-[10px] leading-tight text-[var(--adw-fg-muted)]">
+                        {opt.desc}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Fullscreen Preview Button */}
+          {resolvedSrc && !resolvedSrc.startsWith('asset://') && (
+            <button
+              type="button"
+              onClick={() => onImageClick?.(resolvedSrc, parsed.caption)}
+              className="rounded p-1 text-[var(--adw-fg-secondary)] hover:bg-[var(--adw-hover-bg)]"
+              title="Aperçu plein écran"
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+
+          {/* Delete Image Button */}
+          <button
+            type="button"
+            onClick={onDelete}
+            className="rounded p-1 text-[var(--adw-fg-muted)] hover:bg-[var(--adw-hover-bg)] hover:text-red-500"
+            title="Supprimer l’image"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 interface TyporaEditorProps {
   markdown: string;
   assets: Record<string, MediaAsset>;
@@ -974,7 +1459,7 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
 
   return (
     <div
-      className={`adw-markdown mx-auto max-w-4xl px-8 py-8 md:px-14 ${
+      className={`adw-markdown relative mx-auto max-w-4xl px-8 py-8 md:px-14 after:block after:clear-both ${
         serifMode ? 'adw-markdown-serif' : ''
       }`}
     >
@@ -1029,7 +1514,7 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
               key={block.id}
               id={cleanId}
               onClick={() => setFocusedIndex(idx)}
-              className="group relative cursor-text rounded-lg transition-colors hover:bg-[var(--adw-hover-bg)]/50 px-1.5 -mx-1.5 min-h-[1.4em]"
+              className="group cursor-text rounded-lg transition-colors min-h-[1.4em]"
             >
               {text.trim() ? (
                 renderInlineFormatting(text, assets, onImageClick, `h-${idx}`)
@@ -1106,103 +1591,45 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
           );
         }
 
-        // 3. STANDALONE IMAGE BLOCK (![alt|width](url))
+        // 3. STANDALONE IMAGE BLOCK (![alt|width|wrapMode](url))
         if (block.type === 'image') {
-          const imgMatch = block.raw
-            .trim()
-            .match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-          const rawAlt = imgMatch ? imgMatch[1] : '';
-          const rawUrl = imgMatch ? imgMatch[2].trim() : '';
-          const [altText, widthSpec] = rawAlt.includes('|')
-            ? rawAlt.split('|').map((s) => s.trim())
-            : [rawAlt.trim(), '100%'];
-
-          let resolvedSrc = rawUrl;
-          if (rawUrl.startsWith('asset://')) {
-            const assetId = rawUrl.replace('asset://', '').trim();
-            const assetMeta = assets[assetId];
-            if (assetMeta) resolvedSrc = assetMeta.dataUrl;
-          }
-
-          const validWidths = ['25%', '50%', '75%', '100%'];
-          const normalizedWidth = validWidths.includes(widthSpec)
-            ? widthSpec
-            : '100%';
-
           return (
-            <div
+            <WysiwygImageBlock
               key={block.id}
-              className="group relative my-5 rounded-xl border border-[var(--adw-border)] bg-[var(--adw-code-bg)] p-2.5 transition-colors hover:border-[var(--adw-accent)]/50"
-              style={{ width: normalizedWidth, maxWidth: '100%' }}
-            >
-              {resolvedSrc && !resolvedSrc.startsWith('asset://') ? (
-                <img
-                  src={resolvedSrc}
-                  alt={altText || 'Illustration'}
-                  referrerPolicy="no-referrer"
-                  onClick={() => onImageClick?.(resolvedSrc, altText)}
-                  className="w-full cursor-zoom-in rounded-lg object-cover"
-                />
-              ) : (
-                <div className="flex flex-col items-center justify-center gap-2 py-10 text-xs text-[var(--adw-fg-muted)]">
-                  <ImageIcon className="h-7 w-7 opacity-60" />
-                  <span>Image introuvable ({rawUrl})</span>
-                </div>
-              )}
-
-              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-1 text-xs">
-                <input
-                  type="text"
-                  value={altText}
-                  onChange={(e) => {
-                    const newCaption = e.target.value;
-                    updateBlockAt(
-                      idx,
-                      `![${newCaption}|${normalizedWidth}](${rawUrl})`
-                    );
-                  }}
-                  placeholder="Ajouter une légende à l’image..."
-                  className="min-w-[160px] flex-1 rounded border border-transparent bg-transparent px-1.5 py-0.5 text-xs font-medium text-[var(--adw-fg-secondary)] focus:border-[var(--adw-accent)] focus:bg-[var(--adw-view-bg)] focus:outline-none"
-                />
-
-                <div className="flex items-center gap-1">
-                  {validWidths.map((w) => (
-                    <button
-                      key={w}
-                      type="button"
-                      onClick={() =>
-                        updateBlockAt(idx, `![${altText}|${w}](${rawUrl})`)
-                      }
-                      className={`rounded px-1.5 py-0.5 font-mono text-[11px] tabular-nums transition-colors ${
-                        normalizedWidth === w
-                          ? 'bg-[var(--adw-accent)] font-semibold text-white'
-                          : 'text-[var(--adw-fg-muted)] hover:bg-[var(--adw-hover-bg)]'
-                      }`}
-                    >
-                      {w}
-                    </button>
-                  ))}
-                  {resolvedSrc && !resolvedSrc.startsWith('asset://') && (
-                    <button
-                      type="button"
-                      onClick={() => onImageClick?.(resolvedSrc, altText)}
-                      className="rounded p-1 text-[var(--adw-fg-secondary)] hover:bg-[var(--adw-hover-bg)]"
-                      title="Plein écran"
-                    >
-                      <Maximize2 className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => deleteBlockAt(idx)}
-                    className="rounded p-1 text-[var(--adw-fg-muted)] hover:bg-[var(--adw-hover-bg)] hover:text-red-500"
-                    title="Supprimer l’image"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-            </div>
+              raw={block.raw}
+              assets={assets}
+              onChange={(newRaw) => updateBlockAt(idx, newRaw)}
+              onDelete={() => deleteBlockAt(idx)}
+              onMoveWrapVertical={(clientY, updatedRaw) => {
+                // Find if cursor vertically crossed another block to dynamically reflow text around the dragged image
+                const container = document.querySelector('.adw-markdown');
+                if (!container) return;
+                const children = Array.from(container.children) as HTMLElement[];
+                let targetIdx = idx;
+                for (let c = 0; c < children.length; c++) {
+                  if (c >= blocks.length || c === idx) continue;
+                  const rect = children[c].getBoundingClientRect();
+                  const midY = rect.top + rect.height / 2;
+                  if (c < idx && clientY < midY) {
+                    targetIdx = c;
+                    break;
+                  }
+                  if (c > idx && clientY > midY) {
+                    targetIdx = c;
+                  }
+                }
+                if (targetIdx !== idx) {
+                  const next = [...blocks];
+                  const [moved] = next.splice(idx, 1);
+                  moved.raw = updatedRaw;
+                  next.splice(targetIdx, 0, moved);
+                  commitBlocks(next);
+                } else if (block.raw !== updatedRaw) {
+                  updateBlockAt(idx, updatedRaw);
+                }
+              }}
+              onImageClick={onImageClick}
+            />
           );
         }
 
@@ -1487,7 +1914,7 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
           return (
             <div
               key={block.id}
-              className="my-2 rounded-lg bg-[var(--adw-accent-soft)]/30 px-2.5 py-1 -mx-2.5"
+              className="my-2 overflow-hidden rounded-lg bg-[var(--adw-accent-soft)]/30 px-2.5 py-1"
             >
               <AutoTextarea
                 value={block.raw}
@@ -1511,7 +1938,7 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
           <p
             key={block.id}
             onClick={() => setFocusedIndex(idx)}
-            className="cursor-text rounded-lg px-1.5 py-0.5 -mx-1.5 transition-colors hover:bg-[var(--adw-hover-bg)]/45 min-h-[1.7em]"
+            className="cursor-text rounded-lg py-0.5 transition-colors min-h-[1.7em]"
           >
             {block.raw.trim() ? (
               renderInlineFormatting(
