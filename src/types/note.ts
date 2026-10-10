@@ -22,9 +22,11 @@ export interface MarkdownDocument {
   filename: string; // e.g., "Optique & Dispersion.md"
   projectId: string;
   content: string;
+  savedContent?: string;
   updatedAt: string;
   pinnedInSidebar?: boolean;
   isDirty?: boolean;
+  isNewUnsaved?: boolean;
 }
 
 export interface OpenTab {

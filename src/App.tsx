@@ -39,7 +39,12 @@ import { FormulaDialog } from './components/FormulaDialog';
 
 const STORAGE_KEY_DOCS = 'adwnotes_documents_v2';
 const STORAGE_KEY_TABS = 'adwnotes_tabs_v2';
+const STORAGE_KEY_ACTIVE_TAB = 'adwnotes_active_tab_v2';
 const STORAGE_KEY_THEME = 'adwnotes_theme_pref_v2';
+
+type UnsavedPromptState =
+  | { mode: 'tab'; targetDocId: string }
+  | { mode: 'window'; unsavedDocIds: string[] };
 
 export default function App() {
   // 1. Theme State (Auto-sync with Windows/device prefers-color-scheme + manual override)
@@ -77,9 +82,18 @@ export default function App() {
   const [documents, setDocuments] = useState<MarkdownDocument[]>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY_DOCS);
-      return raw ? JSON.parse(raw) : INITIAL_DOCUMENTS;
+      const loaded: MarkdownDocument[] = raw
+        ? JSON.parse(raw)
+        : INITIAL_DOCUMENTS;
+      return loaded.map((d) => ({
+        ...d,
+        savedContent: d.savedContent ?? d.content,
+      }));
     } catch {
-      return INITIAL_DOCUMENTS;
+      return INITIAL_DOCUMENTS.map((d) => ({
+        ...d,
+        savedContent: d.content,
+      }));
     }
   });
 
@@ -88,9 +102,10 @@ export default function App() {
   const [openTabs, setOpenTabs] = useState<OpenTab[]>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY_TABS);
-      if (raw) {
+      if (raw !== null) {
         const parsed: OpenTab[] = JSON.parse(raw);
         if (parsed.length > 0) return parsed;
+        return [{ docId: documents[0]?.id || 'doc-optics' }];
       }
     } catch {
       // ignore
@@ -102,16 +117,33 @@ export default function App() {
     ];
   });
 
-  const [activeDocId, setActiveDocId] = useState<string>('doc-optics');
+  const [activeDocId, setActiveDocId] = useState<string>(() => {
+    try {
+      const savedActive = localStorage.getItem(STORAGE_KEY_ACTIVE_TAB);
+      if (savedActive) return savedActive;
+    } catch {
+      // ignore
+    }
+    return 'doc-optics';
+  });
+
+  const [unsavedPrompt, setUnsavedPrompt] = useState<UnsavedPromptState | null>(
+    null
+  );
+  const [isAppClosedInPreview, setIsAppClosedInPreview] =
+    useState<boolean>(false);
 
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY_DOCS, JSON.stringify(documents));
-      localStorage.setItem(STORAGE_KEY_TABS, JSON.stringify(openTabs));
+      if (!isAppClosedInPreview) {
+        localStorage.setItem(STORAGE_KEY_TABS, JSON.stringify(openTabs));
+        localStorage.setItem(STORAGE_KEY_ACTIVE_TAB, activeDocId);
+      }
     } catch {
       // storage quota fallback
     }
-  }, [documents, openTabs]);
+  }, [documents, openTabs, activeDocId, isAppClosedInPreview]);
 
   // 3. Minimalist GNOME Text Editor Popovers & Modals
   const [openPopoverVisible, setOpenPopoverVisible] = useState<boolean>(false);
@@ -183,7 +215,7 @@ export default function App() {
     [activeDocument]
   );
 
-  // Update active document content
+  // Update active document content and mark as modified (isDirty) if changed from savedContent
   const updateActiveContent = useCallback(
     (newContent: string) => {
       if (!activeDocument) return;
@@ -192,15 +224,16 @@ export default function App() {
         minute: '2-digit',
       });
       setDocuments((prev) =>
-        prev.map((doc) =>
-          doc.id === activeDocument.id
-            ? {
-                ...doc,
-                content: newContent,
-                updatedAt: `Aujourd’hui · ${nowStr}`,
-              }
-            : doc
-        )
+        prev.map((doc) => {
+          if (doc.id !== activeDocument.id) return doc;
+          const baseline = doc.savedContent ?? doc.content;
+          return {
+            ...doc,
+            content: newContent,
+            isDirty: newContent !== baseline,
+            updatedAt: `Aujourd’hui · ${nowStr}`,
+          };
+        })
       );
     },
     [activeDocument]
@@ -216,6 +249,59 @@ export default function App() {
     [activeDocument, updateActiveContent]
   );
 
+  // Close the native Tauri window (or show closed state in web preview)
+  const triggerApplicationExit = useCallback(
+    (
+      reason: 'last-tab' | 'window-close',
+      nextDocsOverride?: MarkdownDocument[],
+      nextTabsOverride?: OpenTab[]
+    ) => {
+      try {
+        if (nextDocsOverride) {
+          localStorage.setItem(
+            STORAGE_KEY_DOCS,
+            JSON.stringify(nextDocsOverride)
+          );
+        }
+        if (reason === 'last-tab') {
+          localStorage.setItem(STORAGE_KEY_TABS, JSON.stringify([]));
+        } else if (nextTabsOverride) {
+          localStorage.setItem(
+            STORAGE_KEY_TABS,
+            JSON.stringify(nextTabsOverride)
+          );
+        }
+      } catch {
+        // ignore
+      }
+
+      const tauriInternals = (
+        window as unknown as {
+          __TAURI_INTERNALS__?: {
+            invoke: (
+              cmd: string,
+              args?: Record<string, unknown>
+            ) => Promise<unknown>;
+          };
+        }
+      ).__TAURI_INTERNALS__;
+
+      if (tauriInternals?.invoke) {
+        tauriInternals
+          .invoke('close_app')
+          .catch(() =>
+            tauriInternals.invoke('plugin:window|close', { label: 'main' })
+          )
+          .catch(() => {
+            setIsAppClosedInPreview(true);
+          });
+      } else {
+        setIsAppClosedInPreview(true);
+      }
+    },
+    []
+  );
+
   // Open a document in a tab
   const openDocumentInTab = useCallback((docId: string) => {
     setOpenTabs((prev) => {
@@ -226,16 +312,20 @@ export default function App() {
     setOpenPopoverVisible(false);
   }, []);
 
-  // Create a new .md document in a new tab
+  // Create a new .md document in a new tab (marked as a new unsaved note)
   const handleCreateNewDocument = useCallback(() => {
     const untitledCount =
       documents.filter((d) => d.filename.startsWith('Sans titre')).length + 1;
+    const initialText = `# Sans titre ${untitledCount}\n\nCliquez ici pour rédiger votre note en **Markdown** avec rendu fluide.\n`;
     const newDoc: MarkdownDocument = {
       id: `doc-${Date.now()}`,
       filename: `Sans titre ${untitledCount}.md`,
       projectId: 'default',
       updatedAt: 'À l’instant',
-      content: `# Sans titre ${untitledCount}\n\nCliquez ici pour rédiger votre note en **Markdown** avec rendu fluide.\n`,
+      content: initialText,
+      savedContent: initialText,
+      isDirty: false,
+      isNewUnsaved: true,
     };
 
     setDocuments((prev) => [newDoc, ...prev]);
@@ -243,16 +333,37 @@ export default function App() {
     setActiveDocId(newDoc.id);
   }, [documents]);
 
-  // Close a tab
-  const handleCloseTab = useCallback(
-    (docId: string, e?: React.MouseEvent) => {
-      e?.stopPropagation();
+  // Execute the actual tab closure (after save/discard confirmation or immediately if clean)
+  const performCloseTab = useCallback(
+    (docId: string, discardChanges = false) => {
+      let updatedDocs = documents;
+      if (discardChanges) {
+        const target = documents.find((d) => d.id === docId);
+        if (target) {
+          if (target.isNewUnsaved && documents.length > 1) {
+            updatedDocs = documents.filter((d) => d.id !== docId);
+          } else {
+            updatedDocs = documents.map((d) =>
+              d.id === docId
+                ? {
+                    ...d,
+                    content: d.savedContent ?? d.content,
+                    isDirty: false,
+                    isNewUnsaved: false,
+                  }
+                : d
+            );
+          }
+          setDocuments(updatedDocs);
+        }
+      }
+
       if (openTabs.length <= 1) {
-        // If closing the very last tab, reset to a fresh empty note like GNOME Text Editor
-        handleCreateNewDocument();
-        setOpenTabs((prev) => prev.filter((t) => t.docId !== docId));
+        // Closing the very last tab closes the entire application (like a web browser)
+        triggerApplicationExit('last-tab', updatedDocs, []);
         return;
       }
+
       const idx = openTabs.findIndex((t) => t.docId === docId);
       const nextTabs = openTabs.filter((t) => t.docId !== docId);
       setOpenTabs(nextTabs);
@@ -262,8 +373,40 @@ export default function App() {
         setActiveDocId(nextTabs[fallbackIdx].docId);
       }
     },
-    [openTabs, activeDocId, handleCreateNewDocument]
+    [documents, openTabs, activeDocId, triggerApplicationExit]
   );
+
+  // Request closing a tab (prompts user if note is modified or newly created without saving)
+  const handleCloseTab = useCallback(
+    (docId: string, e?: React.MouseEvent) => {
+      e?.stopPropagation();
+      const targetDoc = documents.find((d) => d.id === docId);
+      if (targetDoc && (targetDoc.isDirty || targetDoc.isNewUnsaved)) {
+        setActiveDocId(docId);
+        setUnsavedPrompt({ mode: 'tab', targetDocId: docId });
+        return;
+      }
+      performCloseTab(docId, false);
+    },
+    [documents, performCloseTab]
+  );
+
+  // Request closing the application window via the top-right '✕' button
+  // Keeps all open tabs for the next launch, but warns if any open tab has unsaved changes
+  const handleRequestWindowClose = useCallback(() => {
+    const unsavedIds = openTabs
+      .map((t) => documents.find((d) => d.id === t.docId))
+      .filter((d): d is MarkdownDocument =>
+        Boolean(d && (d.isDirty || d.isNewUnsaved))
+      )
+      .map((d) => d.id);
+
+    if (unsavedIds.length > 0) {
+      setUnsavedPrompt({ mode: 'window', unsavedDocIds: unsavedIds });
+      return;
+    }
+    triggerApplicationExit('window-close');
+  }, [openTabs, documents, triggerApplicationExit]);
 
   // Delete a saved document from recent list
   const handleDeleteDocument = useCallback(
@@ -283,11 +426,12 @@ export default function App() {
     [documents, activeDocId]
   );
 
-  // Save/Download active .md file to Windows
-  const handleDownloadMarkdown = useCallback(
-    (embedAssetsAsBase64 = true) => {
-      if (!activeDocument) return;
-      let finalContent = activeDocument.content;
+  // Save/Download a specific .md file to Windows and mark it as saved
+  const saveDocumentById = useCallback(
+    (docId: string, embedAssetsAsBase64 = true) => {
+      const targetDoc = documents.find((d) => d.id === docId);
+      if (!targetDoc) return;
+      let finalContent = targetDoc.content;
 
       if (embedAssetsAsBase64) {
         Object.values(assets).forEach((asset) => {
@@ -304,16 +448,38 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = activeDocument.filename.endsWith('.md')
-        ? activeDocument.filename
-        : `${activeDocument.filename}.md`;
+      a.download = targetDoc.filename.endsWith('.md')
+        ? targetDoc.filename
+        : `${targetDoc.filename}.md`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+
+      setDocuments((prev) =>
+        prev.map((d) =>
+          d.id === docId
+            ? {
+                ...d,
+                savedContent: d.content,
+                isDirty: false,
+                isNewUnsaved: false,
+              }
+            : d
+        )
+      );
       showToast(`Enregistré sous « ${a.download} »`);
     },
-    [activeDocument, assets, showToast]
+    [documents, assets, showToast]
+  );
+
+  // Save/Download active .md file to Windows
+  const handleDownloadMarkdown = useCallback(
+    (embedAssetsAsBase64 = true) => {
+      if (!activeDocument) return;
+      saveDocumentById(activeDocument.id, embedAssetsAsBase64);
+    },
+    [activeDocument, saveDocumentById]
   );
 
   // Process incoming files (both .md documents and images via Drag-and-Drop or File Picker)
@@ -853,23 +1019,7 @@ export default function App() {
           {/* Iconic GNOME Libadwaita Circular Close Button on the far right */}
           <button
             type="button"
-            onClick={() => {
-              const tauriInternals = (
-                window as unknown as {
-                  __TAURI_INTERNALS__?: {
-                    invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
-                  };
-                }
-              ).__TAURI_INTERNALS__;
-
-              if (tauriInternals?.invoke) {
-                tauriInternals.invoke('plugin:window|close', { label: 'main' }).catch(() => {
-                  if (activeDocument) handleCloseTab(activeDocument.id);
-                });
-              } else if (activeDocument) {
-                handleCloseTab(activeDocument.id);
-              }
-            }}
+            onClick={handleRequestWindowClose}
             className="ml-1 flex h-6 w-6 items-center justify-center rounded-full bg-[var(--adw-active-bg)] text-[var(--adw-fg)] transition-colors hover:bg-[var(--adw-fg)]/20"
             title="Fermer la fenêtre"
           >
@@ -904,8 +1054,14 @@ export default function App() {
                         : 'font-medium text-[var(--adw-fg-secondary)] hover:bg-[var(--adw-hover-bg)]'
                     }`}
                   >
-                    <span className="truncate px-5 text-center">
-                      {doc.filename}
+                    <span className="flex items-center gap-1.5 truncate px-5 text-center">
+                      {(doc.isDirty || doc.isNewUnsaved) && (
+                        <span
+                          className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--adw-accent)]"
+                          title="Modifications non enregistrées"
+                        />
+                      )}
+                      <span className="truncate">{doc.filename}</span>
                     </span>
 
                     <button
@@ -995,6 +1151,176 @@ export default function App() {
               referrerPolicy="no-referrer"
               className="max-h-[80vh] w-auto rounded-xl object-contain"
             />
+          </div>
+        </div>
+      )}
+
+      {/* GNOME Libadwaita Unsaved Changes Alert Dialog (AdwAlertDialog) */}
+      {unsavedPrompt && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs"
+          onClick={() => setUnsavedPrompt(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-[390px] overflow-hidden rounded-2xl border border-[var(--adw-border)] bg-[var(--adw-card-bg)] p-6 text-center shadow-2xl"
+          >
+            <h3 className="text-base font-bold text-[var(--adw-fg)]">
+              Enregistrer les modifications ?
+            </h3>
+            <p className="mt-2.5 text-xs leading-relaxed text-[var(--adw-fg-secondary)]">
+              {unsavedPrompt.mode === 'tab' ? (
+                <>
+                  Le document{' '}
+                  <strong className="font-semibold text-[var(--adw-fg)]">
+                    «{' '}
+                    {documents.find((d) => d.id === unsavedPrompt.targetDocId)
+                      ?.filename || 'Sans titre.md'}{' '}
+                    »
+                  </strong>{' '}
+                  contient des modifications non enregistrées. Si vous ne les
+                  enregistrez pas, elles seront définitivement perdues.
+                </>
+              ) : (
+                <>
+                  {unsavedPrompt.unsavedDocIds.length === 1
+                    ? `Un document ouvert contient des modifications non enregistrées.`
+                    : `${unsavedPrompt.unsavedDocIds.length} documents ouverts contiennent des modifications non enregistrées.`}{' '}
+                  Voulez-vous les enregistrer avant de fermer l’application ?
+                </>
+              )}
+            </p>
+
+            {/* GNOME Libadwaita Alert Dialog Action Buttons */}
+            <div className="mt-6 flex flex-col gap-2 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => setUnsavedPrompt(null)}
+                className="flex-1 rounded-xl border border-[var(--adw-border)] bg-[var(--adw-hover-bg)] px-3 py-2 text-xs font-semibold text-[var(--adw-fg)] transition-colors hover:bg-[var(--adw-active-bg)]"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const prompt = unsavedPrompt;
+                  setUnsavedPrompt(null);
+                  if (prompt.mode === 'tab') {
+                    performCloseTab(prompt.targetDocId, true);
+                  } else {
+                    // Discard unsaved changes in open tabs and close window
+                    const nextDocs = documents
+                      .filter(
+                        (d) =>
+                          !(
+                            prompt.unsavedDocIds.includes(d.id) &&
+                            d.isNewUnsaved &&
+                            documents.length > 1
+                          )
+                      )
+                      .map((d) =>
+                        prompt.unsavedDocIds.includes(d.id)
+                          ? {
+                              ...d,
+                              content: d.savedContent ?? d.content,
+                              isDirty: false,
+                              isNewUnsaved: false,
+                            }
+                          : d
+                      );
+                    const nextTabs = openTabs.filter((t) =>
+                      nextDocs.some((d) => d.id === t.docId)
+                    );
+                    setDocuments(nextDocs);
+                    if (nextTabs.length > 0) {
+                      setOpenTabs(nextTabs);
+                    }
+                    triggerApplicationExit(
+                      nextTabs.length > 0 ? 'window-close' : 'last-tab',
+                      nextDocs,
+                      nextTabs
+                    );
+                  }
+                }}
+                className="flex-1 rounded-xl border border-red-500/30 bg-red-500/15 px-3 py-2 text-xs font-semibold text-red-500 transition-colors hover:bg-red-500 hover:text-white"
+              >
+                Abandonner
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const prompt = unsavedPrompt;
+                  setUnsavedPrompt(null);
+                  if (prompt.mode === 'tab') {
+                    saveDocumentById(prompt.targetDocId, true);
+                    performCloseTab(prompt.targetDocId, false);
+                  } else {
+                    prompt.unsavedDocIds.forEach((id) =>
+                      saveDocumentById(id, true)
+                    );
+                    const savedDocs = documents.map((d) =>
+                      prompt.unsavedDocIds.includes(d.id)
+                        ? {
+                            ...d,
+                            savedContent: d.content,
+                            isDirty: false,
+                            isNewUnsaved: false,
+                          }
+                        : d
+                    );
+                    triggerApplicationExit('window-close', savedDocs, openTabs);
+                  }
+                }}
+                className="flex-1 rounded-xl bg-[var(--adw-accent)] px-3 py-2 text-xs font-semibold text-white transition-opacity hover:opacity-90"
+              >
+                Enregistrer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Simulated Closed State for Web Browser Preview (on Windows/Tauri the native window closes directly) */}
+      {isAppClosedInPreview && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-[var(--adw-window-bg)] p-6 text-center">
+          <div className="max-w-sm rounded-2xl border border-[var(--adw-border)] bg-[var(--adw-card-bg)] p-6 shadow-xl">
+            <h3 className="text-sm font-bold text-[var(--adw-fg)]">
+              Application fermée
+            </h3>
+            <p className="mt-1.5 text-xs text-[var(--adw-fg-muted)]">
+              Sur Windows (Tauri), la fenêtre s’est fermée. Dans cet aperçu web,
+              cliquez ci-dessous pour relancer l’application et vérifier la
+              restauration des onglets.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  const raw = localStorage.getItem(STORAGE_KEY_TABS);
+                  const savedTabs: OpenTab[] = raw ? JSON.parse(raw) : [];
+                  if (savedTabs.length > 0) {
+                    setOpenTabs(savedTabs);
+                    const savedActive = localStorage.getItem(
+                      STORAGE_KEY_ACTIVE_TAB
+                    );
+                    setActiveDocId(savedActive || savedTabs[0].docId);
+                  } else {
+                    // If closed via last tab, start fresh with one tab
+                    const firstDoc = documents[0];
+                    if (firstDoc) {
+                      setOpenTabs([{ docId: firstDoc.id }]);
+                      setActiveDocId(firstDoc.id);
+                    }
+                  }
+                } catch {
+                  // ignore
+                }
+                setIsAppClosedInPreview(false);
+              }}
+              className="mt-4 w-full rounded-xl bg-[var(--adw-accent)] px-4 py-2 text-xs font-semibold text-white hover:opacity-90"
+            >
+              Relancer l’application
+            </button>
           </div>
         </div>
       )}
