@@ -46,6 +46,132 @@ type UnsavedPromptState =
   | { mode: 'tab'; targetDocId: string }
   | { mode: 'window'; unsavedDocIds: string[] };
 
+function createBlankUntitledDoc(num: number): MarkdownDocument {
+  const initialText = `# Sans titre ${num}\n\nCliquez ici pour rédiger votre note en **Markdown** avec rendu fluide.\n`;
+  return {
+    id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    filename: `Sans titre ${num}.md`,
+    projectId: 'default',
+    updatedAt: 'À l’instant',
+    content: initialText,
+    savedContent: initialText,
+    isDirty: false,
+    isNewUnsaved: true,
+  };
+}
+
+function getNextUntitledNumber(
+  currentOpenTabs: OpenTab[],
+  currentDocs: MarkdownDocument[]
+): number {
+  const openDocIds = new Set(currentOpenTabs.map((t) => t.docId));
+  const usedNumbers = new Set<number>();
+
+  currentDocs.forEach((doc) => {
+    if (!openDocIds.has(doc.id)) return;
+    const match = doc.filename.match(/^Sans titre\s+(\d+)(?:\.md)?$/i);
+    if (match) {
+      usedNumbers.add(parseInt(match[1], 10));
+    }
+  });
+
+  let candidate = 1;
+  while (usedNumbers.has(candidate)) {
+    candidate++;
+  }
+  return candidate;
+}
+
+function isDisposableUntitledDraft(doc: MarkdownDocument): boolean {
+  if (doc.isNewUnsaved) return true;
+  const isUntitledName = /^Sans titre\s+\d+(?:\.md)?$/i.test(doc.filename);
+  const isDefaultTemplate =
+    /^#\s+Sans titre\s+\d+\s+Cliquez ici pour rédiger votre note en \*\*Markdown\*\* avec rendu fluide\.\s*$/.test(
+      doc.content.trim()
+    );
+  return isUntitledName && isDefaultTemplate;
+}
+
+interface InitialSessionState {
+  documents: MarkdownDocument[];
+  openTabs: OpenTab[];
+  activeDocId: string;
+}
+
+function loadInitialSession(): InitialSessionState {
+  let loadedDocs: MarkdownDocument[] = INITIAL_DOCUMENTS.map((d) => ({
+    ...d,
+    savedContent: d.content,
+  }));
+
+  try {
+    const rawDocs = localStorage.getItem(STORAGE_KEY_DOCS);
+    if (rawDocs) {
+      const parsed: MarkdownDocument[] = JSON.parse(rawDocs);
+      if (Array.isArray(parsed)) {
+        loadedDocs = parsed.map((d) => ({
+          ...d,
+          savedContent: d.savedContent ?? d.content,
+        }));
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    const rawTabs = localStorage.getItem(STORAGE_KEY_TABS);
+    if (rawTabs !== null) {
+      const parsedTabs: OpenTab[] = JSON.parse(rawTabs);
+      const openIds = new Set(parsedTabs.map((t) => t.docId));
+
+      // Purge any leftover temporary/unsaved "Sans titre" drafts that are not currently open
+      const cleanedDocs = loadedDocs.filter(
+        (d) => openIds.has(d.id) || !isDisposableUntitledDraft(d)
+      );
+
+      // Case A: Previous session was closed via window '✕' with open tabs -> restore exact open tabs
+      const validOpenTabs = parsedTabs.filter((t) =>
+        cleanedDocs.some((d) => d.id === t.docId)
+      );
+      if (validOpenTabs.length > 0) {
+        const savedActive = localStorage.getItem(STORAGE_KEY_ACTIVE_TAB);
+        const activeId =
+          savedActive && validOpenTabs.some((t) => t.docId === savedActive)
+            ? savedActive
+            : validOpenTabs[0].docId;
+        return {
+          documents: cleanedDocs,
+          openTabs: validOpenTabs,
+          activeDocId: activeId,
+        };
+      }
+
+      // Case B: Previous session was closed by closing the very last tab (rawTabs is [])
+      // Start a brand-new session with a fresh "Sans titre 1.md" tab (never reopen the closed tab!)
+      const freshDoc = createBlankUntitledDoc(1);
+      return {
+        documents: [freshDoc, ...cleanedDocs],
+        openTabs: [{ docId: freshDoc.id }],
+        activeDocId: freshDoc.id,
+      };
+    }
+  } catch {
+    // ignore
+  }
+
+  // Very first launch ever
+  return {
+    documents: loadedDocs,
+    openTabs: [
+      { docId: 'doc-optics' },
+      { docId: 'doc-architecture' },
+      { docId: 'doc-guide' },
+    ],
+    activeDocId: 'doc-optics',
+  };
+}
+
 export default function App() {
   // 1. Theme State (Auto-sync with Windows/device prefers-color-scheme + manual override)
   const [themePref, setThemePref] = useState<ThemePreference>(() => {
@@ -79,53 +205,18 @@ export default function App() {
   }, [effectiveDark, themePref]);
 
   // 2. Documents, Media Assets & Open Tabs State (No projects, pure minimalism)
-  const [documents, setDocuments] = useState<MarkdownDocument[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_DOCS);
-      const loaded: MarkdownDocument[] = raw
-        ? JSON.parse(raw)
-        : INITIAL_DOCUMENTS;
-      return loaded.map((d) => ({
-        ...d,
-        savedContent: d.savedContent ?? d.content,
-      }));
-    } catch {
-      return INITIAL_DOCUMENTS.map((d) => ({
-        ...d,
-        savedContent: d.content,
-      }));
-    }
-  });
+  const initialSession = useMemo(() => loadInitialSession(), []);
+  const [documents, setDocuments] = useState<MarkdownDocument[]>(
+    initialSession.documents
+  );
 
   const [assets, setAssets] = useState<Record<string, MediaAsset>>(INITIAL_ASSETS);
 
-  const [openTabs, setOpenTabs] = useState<OpenTab[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_TABS);
-      if (raw !== null) {
-        const parsed: OpenTab[] = JSON.parse(raw);
-        if (parsed.length > 0) return parsed;
-        return [{ docId: documents[0]?.id || 'doc-optics' }];
-      }
-    } catch {
-      // ignore
-    }
-    return [
-      { docId: 'doc-optics' },
-      { docId: 'doc-architecture' },
-      { docId: 'doc-guide' },
-    ];
-  });
+  const [openTabs, setOpenTabs] = useState<OpenTab[]>(initialSession.openTabs);
 
-  const [activeDocId, setActiveDocId] = useState<string>(() => {
-    try {
-      const savedActive = localStorage.getItem(STORAGE_KEY_ACTIVE_TAB);
-      if (savedActive) return savedActive;
-    } catch {
-      // ignore
-    }
-    return 'doc-optics';
-  });
+  const [activeDocId, setActiveDocId] = useState<string>(
+    initialSession.activeDocId
+  );
 
   const [unsavedPrompt, setUnsavedPrompt] = useState<UnsavedPromptState | null>(
     null
@@ -314,33 +405,24 @@ export default function App() {
 
   // Create a new .md document in a new tab (marked as a new unsaved note)
   const handleCreateNewDocument = useCallback(() => {
-    const untitledCount =
-      documents.filter((d) => d.filename.startsWith('Sans titre')).length + 1;
-    const initialText = `# Sans titre ${untitledCount}\n\nCliquez ici pour rédiger votre note en **Markdown** avec rendu fluide.\n`;
-    const newDoc: MarkdownDocument = {
-      id: `doc-${Date.now()}`,
-      filename: `Sans titre ${untitledCount}.md`,
-      projectId: 'default',
-      updatedAt: 'À l’instant',
-      content: initialText,
-      savedContent: initialText,
-      isDirty: false,
-      isNewUnsaved: true,
-    };
+    const nextNum = getNextUntitledNumber(openTabs, documents);
+    const newDoc = createBlankUntitledDoc(nextNum);
 
     setDocuments((prev) => [newDoc, ...prev]);
     setOpenTabs((prev) => [...prev, { docId: newDoc.id }]);
     setActiveDocId(newDoc.id);
-  }, [documents]);
+  }, [openTabs, documents]);
 
   // Execute the actual tab closure (after save/discard confirmation or immediately if clean)
   const performCloseTab = useCallback(
     (docId: string, discardChanges = false) => {
       let updatedDocs = documents;
-      if (discardChanges) {
-        const target = documents.find((d) => d.id === docId);
-        if (target) {
-          if (target.isNewUnsaved && documents.length > 1) {
+      const target = documents.find((d) => d.id === docId);
+
+      if (target) {
+        if (discardChanges) {
+          if (target.isNewUnsaved || isDisposableUntitledDraft(target)) {
+            // Completely remove unsaved new notes when discarded (even if it is the last tab)
             updatedDocs = documents.filter((d) => d.id !== docId);
           } else {
             updatedDocs = documents.map((d) =>
@@ -354,6 +436,10 @@ export default function App() {
                 : d
             );
           }
+          setDocuments(updatedDocs);
+        } else if (isDisposableUntitledDraft(target)) {
+          // If closing an untouched blank "Sans titre" tab without saving, don't keep it in storage
+          updatedDocs = documents.filter((d) => d.id !== docId);
           setDocuments(updatedDocs);
         }
       }
@@ -627,11 +713,22 @@ export default function App() {
     if (!activeDocument) return;
     const trimmed = filenameDraft.trim();
     if (trimmed) {
-      const finalName = trimmed.endsWith('.md') ? trimmed : `${trimmed}.md`;
+      const cleanTitle = trimmed.replace(/\.md$/i, '');
+      const finalName = `${cleanTitle}.md`;
       setDocuments((prev) =>
-        prev.map((d) =>
-          d.id === activeDocument.id ? { ...d, filename: finalName } : d
-        )
+        prev.map((d) => {
+          if (d.id !== activeDocument.id) return d;
+          const updatedContent = d.content.replace(
+            /^#\s+Sans titre\s+\d+/m,
+            `# ${cleanTitle}`
+          );
+          return {
+            ...d,
+            filename: finalName,
+            content: updatedContent,
+            isDirty: d.filename !== finalName || d.isDirty,
+          };
+        })
       );
     }
     setIsRenamingTitle(false);
@@ -1214,8 +1311,7 @@ export default function App() {
                         (d) =>
                           !(
                             prompt.unsavedDocIds.includes(d.id) &&
-                            d.isNewUnsaved &&
-                            documents.length > 1
+                            (d.isNewUnsaved || isDisposableUntitledDraft(d))
                           )
                       )
                       .map((d) =>
@@ -1305,12 +1401,14 @@ export default function App() {
                     );
                     setActiveDocId(savedActive || savedTabs[0].docId);
                   } else {
-                    // If closed via last tab, start fresh with one tab
-                    const firstDoc = documents[0];
-                    if (firstDoc) {
-                      setOpenTabs([{ docId: firstDoc.id }]);
-                      setActiveDocId(firstDoc.id);
-                    }
+                    // If closed via last tab, start a fresh session with a new "Sans titre 1.md" tab
+                    const cleaned = documents.filter(
+                      (d) => !isDisposableUntitledDraft(d)
+                    );
+                    const freshDoc = createBlankUntitledDoc(1);
+                    setDocuments([freshDoc, ...cleaned]);
+                    setOpenTabs([{ docId: freshDoc.id }]);
+                    setActiveDocId(freshDoc.id);
                   }
                 } catch {
                   // ignore
