@@ -41,6 +41,7 @@ const STORAGE_KEY_DOCS = 'adwnotes_documents_v2';
 const STORAGE_KEY_TABS = 'adwnotes_tabs_v2';
 const STORAGE_KEY_ACTIVE_TAB = 'adwnotes_active_tab_v2';
 const STORAGE_KEY_THEME = 'adwnotes_theme_pref_v2';
+const STORAGE_KEY_ASSETS = 'adwnotes_assets_v2';
 
 type UnsavedPromptState =
   | { mode: 'tab'; targetDocId: string }
@@ -210,7 +211,20 @@ export default function App() {
     initialSession.documents
   );
 
-  const [assets, setAssets] = useState<Record<string, MediaAsset>>(INITIAL_ASSETS);
+  const [assets, setAssets] = useState<Record<string, MediaAsset>>(() => {
+    try {
+      const rawAssets = localStorage.getItem(STORAGE_KEY_ASSETS);
+      if (rawAssets) {
+        const parsed = JSON.parse(rawAssets) as Record<string, MediaAsset>;
+        if (parsed && typeof parsed === 'object') {
+          return { ...INITIAL_ASSETS, ...parsed };
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return INITIAL_ASSETS;
+  });
 
   const [openTabs, setOpenTabs] = useState<OpenTab[]>(initialSession.openTabs);
 
@@ -231,10 +245,22 @@ export default function App() {
         localStorage.setItem(STORAGE_KEY_TABS, JSON.stringify(openTabs));
         localStorage.setItem(STORAGE_KEY_ACTIVE_TAB, activeDocId);
       }
+
+      // Persist only custom uploaded assets that are referenced in at least one document
+      const allContent = documents
+        .map((d) => `${d.content}\n${d.savedContent || ''}`)
+        .join('\n');
+      const customAssets: Record<string, MediaAsset> = {};
+      Object.entries(assets).forEach(([id, asset]) => {
+        if (!INITIAL_ASSETS[id] && allContent.includes(`asset://${id}`)) {
+          customAssets[id] = asset;
+        }
+      });
+      localStorage.setItem(STORAGE_KEY_ASSETS, JSON.stringify(customAssets));
     } catch {
       // storage quota fallback
     }
-  }, [documents, openTabs, activeDocId, isAppClosedInPreview]);
+  }, [documents, openTabs, activeDocId, assets, isAppClosedInPreview]);
 
   // 3. Minimalist GNOME Text Editor Popovers & Modals
   const [openPopoverVisible, setOpenPopoverVisible] = useState<boolean>(false);
@@ -288,6 +314,11 @@ export default function App() {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Reset title rename input when switching active document tab
+  useEffect(() => {
+    setIsRenamingTitle(false);
+  }, [activeDocId]);
 
   // Active document
   const activeDocument = useMemo(() => {
@@ -622,6 +653,9 @@ export default function App() {
               filename: normalizedName,
               projectId: 'default',
               content,
+              savedContent: content,
+              isDirty: false,
+              isNewUnsaved: false,
               updatedAt: 'Importé à l’instant',
             };
 
@@ -720,11 +754,15 @@ export default function App() {
             /^#\s+Sans titre\s+\d+/m,
             `# ${cleanTitle}`
           );
+          const baseline = d.savedContent ?? d.content;
           return {
             ...d,
             filename: finalName,
             content: updatedContent,
-            isDirty: d.filename !== finalName || d.isDirty,
+            isDirty:
+              d.filename !== finalName ||
+              updatedContent !== baseline ||
+              Boolean(d.isDirty),
           };
         })
       );

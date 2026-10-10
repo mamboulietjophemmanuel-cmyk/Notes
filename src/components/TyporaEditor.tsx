@@ -17,9 +17,6 @@ import {
   ListChecks,
   Quote,
   WrapText,
-  Layers,
-  BringToFront,
-  SendToBack,
   Move,
 } from 'lucide-react';
 
@@ -499,6 +496,8 @@ const AutoTextarea: React.FC<{
   onMoveNext: () => void;
   onPasteImage?: (e: React.ClipboardEvent<HTMLElement>) => void;
   initialClickPoint?: { x: number; y: number } | null;
+  initialCaretOffset?: number | null;
+  onConsumeInitialCaret?: () => void;
   className?: string;
   placeholder?: string;
 }> = ({
@@ -511,6 +510,8 @@ const AutoTextarea: React.FC<{
   onMoveNext,
   onPasteImage,
   initialClickPoint,
+  initialCaretOffset,
+  onConsumeInitialCaret,
   className = '',
   placeholder,
 }) => {
@@ -543,7 +544,7 @@ const AutoTextarea: React.FC<{
     }
   }, [value]);
 
-  // Focus and place caret at click location (or end of block) on mount
+  // Focus and place caret at click location (or explicit offset / end of block) on mount
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -551,6 +552,13 @@ const AutoTextarea: React.FC<{
       el.textContent = value;
     }
     el.focus();
+
+    if (typeof initialCaretOffset === 'number') {
+      const clamped = Math.max(0, Math.min(value.length, initialCaretOffset));
+      setEditableSelectionOffsets(el, clamped, clamped);
+      onConsumeInitialCaret?.();
+      return;
+    }
 
     if (initialClickPoint && value.length > 0 && document.caretRangeFromPoint) {
       try {
@@ -563,6 +571,7 @@ const AutoTextarea: React.FC<{
           if (sel) {
             sel.removeAllRanges();
             sel.addRange(clickedRange);
+            onConsumeInitialCaret?.();
             return;
           }
         }
@@ -572,6 +581,9 @@ const AutoTextarea: React.FC<{
     }
 
     setEditableSelectionOffsets(el, value.length, value.length);
+    if (initialClickPoint) {
+      onConsumeInitialCaret?.();
+    }
   }, []);
 
   const applyProgrammaticChange = (
@@ -705,11 +717,9 @@ const AutoTextarea: React.FC<{
     }
 
     if (e.key === 'Backspace' && selectionStart === 0 && selectionEnd === 0) {
-      if (value.trim() === '') {
-        e.preventDefault();
-        onMergePrev();
-        return;
-      }
+      e.preventDefault();
+      onMergePrev();
+      return;
     }
 
     if (e.key === 'ArrowUp' && selectionStart === 0) {
@@ -1204,6 +1214,17 @@ const WysiwygImageBlock: React.FC<{
     }
   }, [parsed.wrapSide, isDraggingPos]);
 
+  useEffect(() => {
+    if (!wrapMenuOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (cardRef.current && !cardRef.current.contains(e.target as Node)) {
+        setWrapMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [wrapMenuOpen]);
+
   let resolvedSrc = rawUrl;
   if (rawUrl.startsWith('asset://')) {
     const assetId = rawUrl.replace('asset://', '').trim();
@@ -1599,8 +1620,22 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
     x: number;
     y: number;
   } | null>(null);
+  const [initialCaretOffset, setInitialCaretOffset] = useState<number | null>(
+    null
+  );
   const [copiedBlockIdx, setCopiedBlockIdx] = useState<number | null>(null);
   const lastEmittedMarkdownRef = useRef<string>(markdown);
+  const editorContainerRef = useRef<HTMLDivElement | null>(null);
+  const blocksRef = useRef<MdBlock[]>(blocks);
+
+  useEffect(() => {
+    blocksRef.current = blocks;
+  }, [blocks]);
+
+  const clearInitialCaret = () => {
+    setLastClickPoint(null);
+    setInitialCaretOffset(null);
+  };
 
   useEffect(() => {
     if (markdown !== lastEmittedMarkdownRef.current) {
@@ -1615,6 +1650,7 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
       nextBlocks.length > 0
         ? nextBlocks
         : [{ id: 'blk-0', type: 'paragraph' as const, raw: '', startLine: 0 }];
+    blocksRef.current = safeBlocks;
     setBlocks(safeBlocks);
     const serialized = serializeBlocksToMarkdown(safeBlocks);
     lastEmittedMarkdownRef.current = serialized;
@@ -1637,7 +1673,39 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
     }
     const next = blocks.filter((_, i) => i !== idx);
     commitBlocks(next);
+    setLastClickPoint(null);
+    setInitialCaretOffset(null);
     setFocusedIndex(Math.max(0, idx - 1));
+  };
+
+  const mergeWithPrevAt = (idx: number) => {
+    const current = blocks[idx];
+    if (!current) return;
+    if (current.raw.trim() === '') {
+      deleteBlockAt(idx);
+      return;
+    }
+    if (idx === 0) return;
+    const prev = blocks[idx - 1];
+    if (
+      prev &&
+      (prev.type === 'paragraph' || prev.type === 'heading') &&
+      current.type === 'paragraph'
+    ) {
+      const joinOffset = prev.raw.length;
+      const mergedRaw = prev.raw ? `${prev.raw}${current.raw}` : current.raw;
+      const next = [...blocks];
+      next[idx - 1] = {
+        ...prev,
+        raw: mergedRaw,
+        type: detectBlockType(mergedRaw),
+      };
+      next.splice(idx, 1);
+      commitBlocks(next);
+      setLastClickPoint(null);
+      setInitialCaretOffset(joinOffset);
+      setFocusedIndex(idx - 1);
+    }
   };
 
   const splitBlockAt = (idx: number, before: string, after: string) => {
@@ -1655,6 +1723,8 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
     };
     next.splice(idx + 1, 0, newBlock);
     commitBlocks(next);
+    setLastClickPoint(null);
+    setInitialCaretOffset(0);
     setFocusedIndex(idx + 1);
   };
 
@@ -1667,11 +1737,16 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
       startLine: 0,
     });
     commitBlocks(next);
-    if (focusNew) setFocusedIndex(idx + 1);
+    if (focusNew) {
+      setLastClickPoint(null);
+      setInitialCaretOffset(null);
+      setFocusedIndex(idx + 1);
+    }
   };
 
   return (
     <div
+      ref={editorContainerRef}
       className={`adw-markdown relative mx-auto max-w-4xl px-8 py-8 md:px-14 after:block after:clear-both ${
         serifMode ? 'adw-markdown-serif' : ''
       }`}
@@ -1715,6 +1790,8 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
                   }}
                   onPasteImage={onPasteImage}
                   initialClickPoint={lastClickPoint}
+                  initialCaretOffset={initialCaretOffset}
+                  onConsumeInitialCaret={clearInitialCaret}
                   className="font-sans font-bold tracking-tight text-[var(--adw-fg)]"
                 />
               </Tag>
@@ -1726,6 +1803,7 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
               key={block.id}
               id={cleanId}
               onClick={(e: React.MouseEvent) => {
+                setInitialCaretOffset(null);
                 setLastClickPoint({ x: e.clientX, y: e.clientY });
                 setFocusedIndex(idx);
               }}
@@ -1746,8 +1824,8 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
         if (block.type === 'math') {
           const innerLatex = block.raw
             .trim()
-            .replace(/^\$\$\s*/, '')
-            .replace(/\s*\$\$$/, '');
+            .replace(/^\$\$\r?\n?/, '')
+            .replace(/\r?\n?\$\$$/, '');
           const html = renderLatexInline(innerLatex, true);
 
           if (isFocused) {
@@ -1816,31 +1894,40 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
               onChange={(newRaw) => updateBlockAt(idx, newRaw)}
               onDelete={() => deleteBlockAt(idx)}
               onMoveWrapVertical={(clientY, updatedRaw) => {
-                // Find if cursor vertically crossed another block to dynamically reflow text around the dragged image
-                const container = document.querySelector('.adw-markdown');
-                if (!container) return;
+                const container = editorContainerRef.current;
+                const currentBlocks = blocksRef.current;
+                const currentIdx = currentBlocks.findIndex(
+                  (b) => b.id === block.id
+                );
+                if (!container || currentIdx === -1) return;
+
                 const children = Array.from(container.children) as HTMLElement[];
-                let targetIdx = idx;
+                let targetIdx = currentIdx;
                 for (let c = 0; c < children.length; c++) {
-                  if (c >= blocks.length || c === idx) continue;
+                  if (c >= currentBlocks.length || c === currentIdx) continue;
                   const rect = children[c].getBoundingClientRect();
                   const midY = rect.top + rect.height / 2;
-                  if (c < idx && clientY < midY) {
+                  if (c < currentIdx && clientY < midY) {
                     targetIdx = c;
                     break;
                   }
-                  if (c > idx && clientY > midY) {
+                  if (c > currentIdx && clientY > midY) {
                     targetIdx = c;
                   }
                 }
-                if (targetIdx !== idx) {
-                  const next = [...blocks];
-                  const [moved] = next.splice(idx, 1);
+                if (targetIdx !== currentIdx) {
+                  const next = [...currentBlocks];
+                  const [moved] = next.splice(currentIdx, 1);
                   moved.raw = updatedRaw;
                   next.splice(targetIdx, 0, moved);
                   commitBlocks(next);
-                } else if (block.raw !== updatedRaw) {
-                  updateBlockAt(idx, updatedRaw);
+                } else if (currentBlocks[currentIdx].raw !== updatedRaw) {
+                  const next = currentBlocks.map((b, i) =>
+                    i === currentIdx
+                      ? { ...b, raw: updatedRaw, type: detectBlockType(updatedRaw) }
+                      : b
+                  );
+                  commitBlocks(next);
                 }
               }}
               onImageClick={onImageClick}
@@ -2136,17 +2223,19 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
                 onChange={(val) => updateBlockAt(idx, val)}
                 onBlur={() => setFocusedIndex(null)}
                 onSplitBlock={(before, after) => splitBlockAt(idx, before, after)}
-                onMergePrev={() => deleteBlockAt(idx)}
+                onMergePrev={() => mergeWithPrevAt(idx)}
                 onMovePrev={() => {
-                  setLastClickPoint(null);
+                  clearInitialCaret();
                   setFocusedIndex(Math.max(0, idx - 1));
                 }}
                 onMoveNext={() => {
-                  setLastClickPoint(null);
+                  clearInitialCaret();
                   setFocusedIndex(Math.min(blocks.length - 1, idx + 1));
                 }}
                 onPasteImage={onPasteImage}
                 initialClickPoint={lastClickPoint}
+                initialCaretOffset={initialCaretOffset}
+                onConsumeInitialCaret={clearInitialCaret}
                 placeholder="Écrivez en Markdown (ex: # Titre, **gras**, $formule$, ou déposez une image)..."
                 className="text-[15.5px] leading-[1.68] text-[var(--adw-fg)]"
               />
@@ -2158,6 +2247,7 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
           <p
             key={block.id}
             onClick={(e) => {
+              setInitialCaretOffset(null);
               setLastClickPoint({ x: e.clientX, y: e.clientY });
               setFocusedIndex(idx);
             }}
