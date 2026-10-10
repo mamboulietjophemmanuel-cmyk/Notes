@@ -639,7 +639,7 @@ export default function App() {
 
   // Handle clipboard paste of images
   const handleEditorPaste = useCallback(
-    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    (e: React.ClipboardEvent<HTMLElement>) => {
       const items = e.clipboardData?.items;
       if (!items) return;
 

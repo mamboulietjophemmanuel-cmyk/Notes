@@ -408,6 +408,87 @@ function renderInlineFormatting(
   });
 }
 
+function getEditableSelectionOffsets(el: HTMLElement): {
+  start: number;
+  end: number;
+} {
+  const fullText = el.textContent || '';
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) {
+    return { start: fullText.length, end: fullText.length };
+  }
+  const range = sel.getRangeAt(0);
+  if (!el.contains(range.startContainer) || !el.contains(range.endContainer)) {
+    return { start: fullText.length, end: fullText.length };
+  }
+
+  const preStart = range.cloneRange();
+  preStart.selectNodeContents(el);
+  preStart.setEnd(range.startContainer, range.startOffset);
+  const start = preStart.toString().length;
+
+  const preEnd = range.cloneRange();
+  preEnd.selectNodeContents(el);
+  preEnd.setEnd(range.endContainer, range.endOffset);
+  const end = preEnd.toString().length;
+
+  return { start, end };
+}
+
+function setEditableSelectionOffsets(
+  el: HTMLElement,
+  start: number,
+  end: number = start
+) {
+  const sel = window.getSelection();
+  if (!sel) return;
+
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+  let currentNode = walker.nextNode() as Text | null;
+
+  if (!currentNode) {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return;
+  }
+
+  let charIndex = 0;
+  let startNode: Node = currentNode;
+  let startOffset = 0;
+  let endNode: Node = currentNode;
+  let endOffset = 0;
+  let foundStart = false;
+  let foundEnd = false;
+
+  while (currentNode) {
+    const nodeLen = currentNode.length;
+    if (!foundStart && start <= charIndex + nodeLen) {
+      startNode = currentNode;
+      startOffset = Math.max(0, start - charIndex);
+      foundStart = true;
+    }
+    if (!foundEnd && end <= charIndex + nodeLen) {
+      endNode = currentNode;
+      endOffset = Math.max(0, end - charIndex);
+      foundEnd = true;
+      break;
+    }
+    charIndex += nodeLen;
+    endNode = currentNode;
+    endOffset = nodeLen;
+    currentNode = walker.nextNode() as Text | null;
+  }
+
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
 const AutoTextarea: React.FC<{
   value: string;
   onChange: (val: string) => void;
@@ -416,7 +497,8 @@ const AutoTextarea: React.FC<{
   onMergePrev: () => void;
   onMovePrev: () => void;
   onMoveNext: () => void;
-  onPasteImage?: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  onPasteImage?: (e: React.ClipboardEvent<HTMLElement>) => void;
+  initialClickPoint?: { x: number; y: number } | null;
   className?: string;
   placeholder?: string;
 }> = ({
@@ -428,29 +510,88 @@ const AutoTextarea: React.FC<{
   onMovePrev,
   onMoveNext,
   onPasteImage,
+  initialClickPoint,
   className = '',
   placeholder,
 }) => {
-  const ref = useRef<HTMLTextAreaElement | null>(null);
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const pendingSelectionRef = useRef<{ start: number; end: number } | null>(
+    null
+  );
 
+  // Sync external value changes without clobbering active typing selection
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    el.style.height = '0px';
-    el.style.height = `${Math.max(28, el.scrollHeight)}px`;
+    if ((el.textContent || '') !== value) {
+      el.textContent = value;
+      if (pendingSelectionRef.current) {
+        setEditableSelectionOffsets(
+          el,
+          pendingSelectionRef.current.start,
+          pendingSelectionRef.current.end
+        );
+        pendingSelectionRef.current = null;
+      }
+    } else if (pendingSelectionRef.current) {
+      setEditableSelectionOffsets(
+        el,
+        pendingSelectionRef.current.start,
+        pendingSelectionRef.current.end
+      );
+      pendingSelectionRef.current = null;
+    }
   }, [value]);
 
+  // Focus and place caret at click location (or end of block) on mount
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    if ((el.textContent || '') !== value) {
+      el.textContent = value;
+    }
     el.focus();
-    const len = el.value.length;
-    el.setSelectionRange(len, len);
+
+    if (initialClickPoint && value.length > 0 && document.caretRangeFromPoint) {
+      try {
+        const clickedRange = document.caretRangeFromPoint(
+          initialClickPoint.x,
+          initialClickPoint.y
+        );
+        if (clickedRange && el.contains(clickedRange.startContainer)) {
+          const sel = window.getSelection();
+          if (sel) {
+            sel.removeAllRanges();
+            sel.addRange(clickedRange);
+            return;
+          }
+        }
+      } catch {
+        // Fallback to end of text
+      }
+    }
+
+    setEditableSelectionOffsets(el, value.length, value.length);
   }, []);
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const applyProgrammaticChange = (
+    nextVal: string,
+    nextCaretStart: number,
+    nextCaretEnd: number = nextCaretStart
+  ) => {
+    const el = ref.current;
+    pendingSelectionRef.current = { start: nextCaretStart, end: nextCaretEnd };
+    if (el) {
+      el.textContent = nextVal;
+      setEditableSelectionOffsets(el, nextCaretStart, nextCaretEnd);
+    }
+    onChange(nextVal);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLSpanElement>) => {
     const el = e.currentTarget;
-    const { selectionStart, selectionEnd } = el;
+    const { start: selectionStart, end: selectionEnd } =
+      getEditableSelectionOffsets(el);
 
     if (e.ctrlKey || e.metaKey) {
       const k = e.key.toLowerCase();
@@ -458,18 +599,38 @@ const AutoTextarea: React.FC<{
         e.preventDefault();
         const sel = value.slice(selectionStart, selectionEnd) || 'texte';
         const next =
-          value.slice(0, selectionStart) + `**${sel}**` + value.slice(selectionEnd);
-        onChange(next);
+          value.slice(0, selectionStart) +
+          `**${sel}**` +
+          value.slice(selectionEnd);
+        applyProgrammaticChange(
+          next,
+          selectionStart + 2,
+          selectionStart + 2 + sel.length
+        );
         return;
       }
       if (k === 'i') {
         e.preventDefault();
         const sel = value.slice(selectionStart, selectionEnd) || 'texte';
         const next =
-          value.slice(0, selectionStart) + `*${sel}*` + value.slice(selectionEnd);
-        onChange(next);
+          value.slice(0, selectionStart) +
+          `*${sel}*` +
+          value.slice(selectionEnd);
+        applyProgrammaticChange(
+          next,
+          selectionStart + 1,
+          selectionStart + 1 + sel.length
+        );
         return;
       }
+    }
+
+    if (e.key === 'Enter' && e.shiftKey) {
+      e.preventDefault();
+      const next =
+        value.slice(0, selectionStart) + '\n' + value.slice(selectionEnd);
+      applyProgrammaticChange(next, selectionStart + 1);
+      return;
     }
 
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -479,7 +640,9 @@ const AutoTextarea: React.FC<{
 
       if (value.trim() === '$$') {
         e.preventDefault();
-        onChange('$$\n\\int_{-\\infty}^{+\\infty} e^{-x^2}\\, \\mathrm{d}x = \\sqrt{\\pi}\n$$');
+        onChange(
+          '$$\n\\int_{-\\infty}^{+\\infty} e^{-x^2}\\, \\mathrm{d}x = \\sqrt{\\pi}\n$$'
+        );
         return;
       }
       if (value.trim().startsWith('```') && !value.includes('\n')) {
@@ -496,11 +659,15 @@ const AutoTextarea: React.FC<{
       if (taskMatch) {
         e.preventDefault();
         if (!taskMatch[2].trim() && after.trim() === '') {
-          const trimmedBefore = before.replace(/\n?\s*[-*+]\s+\[[ xX]\]\s*$/, '');
+          const trimmedBefore = before.replace(
+            /\n?\s*[-*+]\s+\[[ xX]\]\s*$/,
+            ''
+          );
           onSplitBlock(trimmedBefore, '');
         } else {
-          const next = `${before}\n- [ ] ${after}`;
-          onChange(next);
+          const insert = `\n- [ ] `;
+          const next = `${before}${insert}${after}`;
+          applyProgrammaticChange(next, before.length + insert.length);
         }
         return;
       }
@@ -511,8 +678,9 @@ const AutoTextarea: React.FC<{
           const trimmedBefore = before.replace(/\n?\s*[-*+]\s*$/, '');
           onSplitBlock(trimmedBefore, '');
         } else {
-          const next = `${before}\n${bulletMatch[1]}${after}`;
-          onChange(next);
+          const insert = `\n${bulletMatch[1]}`;
+          const next = `${before}${insert}${after}`;
+          applyProgrammaticChange(next, before.length + insert.length);
         }
         return;
       }
@@ -524,8 +692,9 @@ const AutoTextarea: React.FC<{
           onSplitBlock(trimmedBefore, '');
         } else {
           const nextNum = parseInt(numMatch[2], 10) + 1;
-          const next = `${before}\n${numMatch[1]}${nextNum}${numMatch[3]}${after}`;
-          onChange(next);
+          const insert = `\n${numMatch[1]}${nextNum}${numMatch[3]}`;
+          const next = `${before}${insert}${after}`;
+          applyProgrammaticChange(next, before.length + insert.length);
         }
         return;
       }
@@ -561,18 +730,58 @@ const AutoTextarea: React.FC<{
     }
   };
 
+  const handleInput = (e: React.FormEvent<HTMLSpanElement>) => {
+    const el = e.currentTarget;
+    const rawText = el.textContent || '';
+    if (!rawText && el.innerHTML !== '') {
+      el.innerHTML = '';
+    }
+    onChange(rawText);
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLSpanElement>) => {
+    onPasteImage?.(e);
+    if (e.defaultPrevented) return;
+
+    e.preventDefault();
+    const pastedText = e.clipboardData
+      .getData('text/plain')
+      .replace(/\r\n/g, '\n');
+    if (!pastedText) return;
+
+    const el = e.currentTarget;
+    const { start, end } = getEditableSelectionOffsets(el);
+    const next = value.slice(0, start) + pastedText + value.slice(end);
+    applyProgrammaticChange(next, start + pastedText.length);
+  };
+
   return (
-    <textarea
-      ref={ref}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      onBlur={onBlur}
-      onKeyDown={handleKeyDown}
-      onPaste={onPasteImage}
-      placeholder={placeholder}
-      rows={1}
-      className={`w-full resize-none overflow-hidden bg-transparent focus:outline-none ${className}`}
-    />
+    <>
+      <span
+        ref={ref}
+        role="textbox"
+        aria-multiline="true"
+        contentEditable
+        suppressContentEditableWarning
+        spellCheck={true}
+        onInput={handleInput}
+        onBlur={onBlur}
+        onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+        className={`inline whitespace-pre-wrap break-words rounded bg-[var(--adw-accent-soft)]/30 px-1 -mx-1 py-0.5 box-decoration-clone caret-[var(--adw-accent)] focus:outline-none ${className}`}
+      />
+      {!value && placeholder && (
+        <span
+          onMouseDown={(e) => {
+            e.preventDefault();
+            ref.current?.focus();
+          }}
+          className="pointer-events-none select-none text-[var(--adw-fg-muted)] opacity-60"
+        >
+          {placeholder}
+        </span>
+      )}
+    </>
   );
 };
 
@@ -1364,7 +1573,7 @@ interface TyporaEditorProps {
   serifMode?: boolean;
   onChange: (newMarkdown: string) => void;
   onImageClick?: (src: string, alt: string) => void;
-  onPasteImage?: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  onPasteImage?: (e: React.ClipboardEvent<HTMLElement>) => void;
   onOpenTableModal?: () => void;
   onOpenFormulaModal?: () => void;
   onTriggerImageUpload?: () => void;
@@ -1386,6 +1595,10 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
     parseMarkdownIntoBlocks(markdown)
   );
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
+  const [lastClickPoint, setLastClickPoint] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const [copiedBlockIdx, setCopiedBlockIdx] = useState<number | null>(null);
   const lastEmittedMarkdownRef = useRef<string>(markdown);
 
@@ -1478,18 +1691,13 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
             .replace(/[^a-z0-9]+/g, '-')
             .replace(/(^-|-$)/g, '')}`;
 
-          const sizeClass =
-            level === 1
-              ? 'text-[clamp(1.65rem,2.5vw,2.15rem)] font-bold border-b border-[var(--adw-border-subtle)] pb-2 mt-6 mb-3'
-              : level === 2
-              ? 'text-[clamp(1.3rem,2vw,1.55rem)] font-bold mt-5 mb-2.5'
-              : 'text-[1.15rem] font-semibold mt-4 mb-2';
-
+          const Tag = (`h${level}` as unknown) as React.ElementType;
           if (isFocused) {
             return (
-              <div
+              <Tag
                 key={block.id}
-                className={`relative rounded-lg bg-[var(--adw-accent-soft)]/35 px-2 -mx-2 ${sizeClass}`}
+                id={cleanId}
+                className="group cursor-text rounded-lg transition-colors min-h-[1.4em]"
               >
                 <AutoTextarea
                   value={block.raw}
@@ -1497,23 +1705,30 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
                   onBlur={() => setFocusedIndex(null)}
                   onSplitBlock={(before, after) => splitBlockAt(idx, before, after)}
                   onMergePrev={() => deleteBlockAt(idx)}
-                  onMovePrev={() => setFocusedIndex(Math.max(0, idx - 1))}
-                  onMoveNext={() =>
-                    setFocusedIndex(Math.min(blocks.length - 1, idx + 1))
-                  }
+                  onMovePrev={() => {
+                    setLastClickPoint(null);
+                    setFocusedIndex(Math.max(0, idx - 1));
+                  }}
+                  onMoveNext={() => {
+                    setLastClickPoint(null);
+                    setFocusedIndex(Math.min(blocks.length - 1, idx + 1));
+                  }}
                   onPasteImage={onPasteImage}
+                  initialClickPoint={lastClickPoint}
                   className="font-sans font-bold tracking-tight text-[var(--adw-fg)]"
                 />
-              </div>
+              </Tag>
             );
           }
 
-          const Tag = (`h${level}` as unknown) as React.ElementType;
           return (
             <Tag
               key={block.id}
               id={cleanId}
-              onClick={() => setFocusedIndex(idx)}
+              onClick={(e: React.MouseEvent) => {
+                setLastClickPoint({ x: e.clientX, y: e.clientY });
+                setFocusedIndex(idx);
+              }}
               className="group cursor-text rounded-lg transition-colors min-h-[1.4em]"
             >
               {text.trim() ? (
@@ -1912,9 +2127,9 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
         // 9. STANDARD PARAGRAPH BLOCK
         if (isFocused) {
           return (
-            <div
+            <p
               key={block.id}
-              className="my-2 overflow-hidden rounded-lg bg-[var(--adw-accent-soft)]/30 px-2.5 py-1"
+              className="cursor-text rounded-lg py-0.5 transition-colors min-h-[1.7em]"
             >
               <AutoTextarea
                 value={block.raw}
@@ -1922,22 +2137,30 @@ export const TyporaEditor: React.FC<TyporaEditorProps> = ({
                 onBlur={() => setFocusedIndex(null)}
                 onSplitBlock={(before, after) => splitBlockAt(idx, before, after)}
                 onMergePrev={() => deleteBlockAt(idx)}
-                onMovePrev={() => setFocusedIndex(Math.max(0, idx - 1))}
-                onMoveNext={() =>
-                  setFocusedIndex(Math.min(blocks.length - 1, idx + 1))
-                }
+                onMovePrev={() => {
+                  setLastClickPoint(null);
+                  setFocusedIndex(Math.max(0, idx - 1));
+                }}
+                onMoveNext={() => {
+                  setLastClickPoint(null);
+                  setFocusedIndex(Math.min(blocks.length - 1, idx + 1));
+                }}
                 onPasteImage={onPasteImage}
+                initialClickPoint={lastClickPoint}
                 placeholder="Écrivez en Markdown (ex: # Titre, **gras**, $formule$, ou déposez une image)..."
                 className="text-[15.5px] leading-[1.68] text-[var(--adw-fg)]"
               />
-            </div>
+            </p>
           );
         }
 
         return (
           <p
             key={block.id}
-            onClick={() => setFocusedIndex(idx)}
+            onClick={(e) => {
+              setLastClickPoint({ x: e.clientX, y: e.clientY });
+              setFocusedIndex(idx);
+            }}
             className="cursor-text rounded-lg py-0.5 transition-colors min-h-[1.7em]"
           >
             {block.raw.trim() ? (
