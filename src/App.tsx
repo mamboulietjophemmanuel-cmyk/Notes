@@ -83,13 +83,13 @@ function getNextUntitledNumber(
 }
 
 function isDisposableUntitledDraft(doc: MarkdownDocument): boolean {
-  if (doc.isNewUnsaved) return true;
+  if (doc.isNewUnsaved && !doc.isDirty) return true;
   const isUntitledName = /^Sans titre\s+\d+(?:\.md)?$/i.test(doc.filename);
   const isDefaultTemplate =
     /^#\s+Sans titre\s+\d+\s+Cliquez ici pour rédiger votre note en \*\*Markdown\*\* avec rendu fluide\.\s*$/.test(
       doc.content.trim()
     );
-  return isUntitledName && isDefaultTemplate;
+  return isUntitledName && isDefaultTemplate && !doc.isDirty;
 }
 
 interface InitialSessionState {
@@ -462,12 +462,12 @@ export default function App() {
     [documents, openTabs, activeDocId, triggerApplicationExit]
   );
 
-  // Request closing a tab (prompts user if note is modified or newly created without saving)
+  // Request closing a tab (prompts user only if the note has actual unsaved modifications)
   const handleCloseTab = useCallback(
     (docId: string, e?: React.MouseEvent) => {
       e?.stopPropagation();
       const targetDoc = documents.find((d) => d.id === docId);
-      if (targetDoc && (targetDoc.isDirty || targetDoc.isNewUnsaved)) {
+      if (targetDoc && targetDoc.isDirty) {
         setActiveDocId(docId);
         setUnsavedPrompt({ mode: 'tab', targetDocId: docId });
         return;
@@ -482,9 +482,7 @@ export default function App() {
   const handleRequestWindowClose = useCallback(() => {
     const unsavedIds = openTabs
       .map((t) => documents.find((d) => d.id === t.docId))
-      .filter((d): d is MarkdownDocument =>
-        Boolean(d && (d.isDirty || d.isNewUnsaved))
-      )
+      .filter((d): d is MarkdownDocument => Boolean(d && d.isDirty))
       .map((d) => d.id);
 
     if (unsavedIds.length > 0) {
@@ -1152,7 +1150,7 @@ export default function App() {
                     }`}
                   >
                     <span className="flex items-center gap-1.5 truncate px-5 text-center">
-                      {(doc.isDirty || doc.isNewUnsaved) && (
+                      {doc.isDirty && (
                         <span
                           className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--adw-accent)]"
                           title="Modifications non enregistrées"
